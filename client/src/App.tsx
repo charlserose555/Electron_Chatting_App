@@ -278,6 +278,8 @@ export default function App() {
   
   const isWindowActiveRef = useRef(isWindowActive);
   const activeMessagesRef = useRef<Message[]>([]);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -344,7 +346,7 @@ export default function App() {
       if (me && connectedServerUrl) {
         void loadHistory(userId, true);
       } else {
-        smoothScrollToBottom(true, true);
+        smoothScrollToBottom(true, false);
       }
     });
 
@@ -394,6 +396,10 @@ export default function App() {
       if (socketRef.current) socketRef.current.disconnect();
     };
   }, []);
+
+  useEffect(() => {
+    resizeComposerTextarea();
+  }, [draft, replyingTo]);
 
   useEffect(() => {
     const el = composerRef.current;
@@ -765,7 +771,7 @@ export default function App() {
 
     if (forceScroll) {
       autoScrollRef.current = true;
-      smoothScrollToBottom(true, true);
+      smoothScrollToBottom(true, false);
     }
   }
 
@@ -785,7 +791,7 @@ export default function App() {
     });
 
     setReplyingTo(null);
-    smoothScrollToBottom(true, true);
+    smoothScrollToBottom(true, false);
   }
 
   async function sendAttachment() {
@@ -959,6 +965,26 @@ export default function App() {
       });
   }
 
+  function resizeComposerTextarea() {
+    const el = composerTextareaRef.current;
+    if (!el) return;
+  
+    el.style.height = '0px';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }
+  
+  function syncMessageViewportState() {
+    const el = messagesRef.current;
+    if (!el) return;
+  
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isAwayFromBottom = distanceFromBottom >= 80;
+  
+    autoScrollRef.current = !isAwayFromBottom;
+    setShowScrollToBottom(isAwayFromBottom);
+    updateMessageScrollbar();
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -1013,18 +1039,15 @@ export default function App() {
   function smoothScrollToBottom(force = false, smooth = true) {
     requestAnimationFrame(() => {
       scrollToBottom(force, smooth);
-      updateMessageScrollbar();
+  
+      requestAnimationFrame(() => {
+        syncMessageViewportState();
+      });
     });
   }
 
   function handleMessagesScroll() {
-    const el = messagesRef.current;
-    if (!el) return;
-  
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    autoScrollRef.current = distanceFromBottom < 80;
-  
-    updateMessageScrollbar();
+    syncMessageViewportState();
   
     if (selectedUserIdRef.current && autoScrollRef.current) {
       markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
@@ -1112,7 +1135,7 @@ export default function App() {
 
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
-  }, [activeMessages]);
+  }, [activeMessages]);  
 
   const contextTargetMessage = useMemo(() => {
     if (!contextMenu) return null;
@@ -1128,6 +1151,12 @@ export default function App() {
     if (!selectedUserId) return;
     markUnreadMessagesAsRead(selectedUserId, activeMessages);
   }, [activeMessages, selectedUserId, isWindowActive]);
+
+  // useEffect(() => {
+  //   requestAnimationFrame(() => {
+  //     syncMessageViewportState();
+  //   });
+  // }, [activeMessages]);
 
   useEffect(() => {
     smoothScrollToBottom(false, false);
@@ -1398,6 +1427,24 @@ export default function App() {
                   }}
                 />
               </div>
+
+              {showScrollToBottom ? (
+                <button
+                  className="scroll-bottom-btn"
+                  onClick={() => {
+                    autoScrollRef.current = true;
+                    smoothScrollToBottom(true, true);
+
+                    if (selectedUserIdRef.current) {
+                      markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
+                    }
+                  }}
+                  aria-label="Scroll to bottom"
+                  title="Scroll to bottom"
+                >
+                  ↓
+                </button>
+              ) : null}
             </div>
 
             <footer className="composer" ref={composerRef}>
@@ -1428,16 +1475,20 @@ export default function App() {
                   </div>
                 ) : null}
 
-                <input
-                  ref={composerInputRef}
+                <textarea
+                  ref={composerTextareaRef}
+                  className="composer-input"
                   value={draft}
+                  rows={1}
                   onChange={(e) => {
                     setDraft(e.target.value);
                     startTyping();
+                    e.target.style.height = '0px';
+                    e.target.style.height = `${Math.min(e.target.scrollHeight, 140)}px`;
                   }}
                   onBlur={stopTyping}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
+                    if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       sendMessage();
                     }
