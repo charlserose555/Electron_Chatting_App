@@ -964,3 +964,44 @@ button {
     0 0 0 8px rgba(93, 183, 255, 0.12);
   transition: box-shadow 0.2s ease;
 }
+
+.tg-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+  line-height: 1;
+  transform: translateY(0.5px);
+}
+
+.tg-status.sent,
+.tg-status.delivered {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.tg-status.read {
+  color: #53bdeb;
+}
+
+.tg-status-svg {
+  display: block;
+  overflow: visible;
+}
+
+.tg-status-single {
+  width: 12px;
+  height: 10px;
+}
+
+.tg-status-double {
+  width: 16px;
+  height: 10px;
+}
+
+.tg-status-svg path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
