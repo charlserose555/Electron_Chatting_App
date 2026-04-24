@@ -1041,3 +1041,7 @@ button {
 .scroll-bottom-btn:hover {
   background: rgba(18, 39, 73, 0.98);
 }
+
+.online-dot.idle {
+  background: #fbbf24;
+}

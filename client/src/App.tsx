@@ -244,6 +244,7 @@ export default function App() {
   const [me, setMe] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  const [idleUserIds, setIdleUserIds] = useState<string[]>([]); 
   const [selectedUserId, setSelectedUserId] = useState('');
   const [search, setSearch] = useState('');
   const [messagesByConv, setMessagesByConv] = useState<Record<string, Message[]>>({});
@@ -270,7 +271,7 @@ export default function App() {
   const messagesRef = useRef<HTMLElement | null>(null);
   const autoScrollRef = useRef(true);
   const incomingFromUserIdRef = useRef<string | null>(null);
-  const composerInputRef = useRef<HTMLInputElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLElement | null>(null);
   const [isWindowActive, setIsWindowActive] = useState(
     () => document.visibilityState === 'visible' && document.hasFocus()
@@ -279,7 +280,6 @@ export default function App() {
   const isWindowActiveRef = useRef(isWindowActive);
   const activeMessagesRef = useRef<Message[]>([]);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -398,6 +398,22 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!socketRef.current || !me) return;
+  
+    socketRef.current.emit('presence:set-state', {
+      state: isWindowActive ? 'online' : 'idle'
+    });
+  }, [isWindowActive, me]);
+
+  useEffect(() => {
+    if (!socketRef.current || !me) return;
+  
+    socketRef.current.emit('presence:set-state', {
+      state: callState ? 'online' : isWindowActive ? 'online' : 'idle'
+    });
+  }, [isWindowActive, me, callState]);
+
+  useEffect(() => {
     resizeComposerTextarea();
   }, [draft, replyingTo]);
 
@@ -469,12 +485,16 @@ export default function App() {
 
     socket.on('connect', () => {
       socket.emit('auth:join', { userId: loginData.user.id });
-      socket.emit('users:sync', (payload: { users: User[]; onlineUserIds: string[] }) => {
-        setUsers(payload.users);
-        setOnlineUserIds(payload.onlineUserIds);
-        const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
-        setSelectedUserId((curr) => curr || fallback);
-      });
+      socket.emit(
+        'users:sync',
+        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+          setUsers(payload.users);
+          setOnlineUserIds(payload.onlineUserIds || []);
+          setIdleUserIds(payload.idleUserIds || []);
+          const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
+          setSelectedUserId((curr) => curr || fallback);
+        }
+      );
     });
 
     socket.on(
@@ -501,13 +521,23 @@ export default function App() {
     );
 
     socket.on('users:changed', () => {
-      socket.emit('users:sync', (payload: { users: User[]; onlineUserIds: string[] }) => {
-        setUsers(payload.users);
-        setOnlineUserIds(payload.onlineUserIds);
-      });
+      socket.emit(
+        'users:sync',
+        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+          setUsers(payload.users);
+          setOnlineUserIds(payload.onlineUserIds || []);
+          setIdleUserIds(payload.idleUserIds || []);
+        }
+      );
     });
 
-    socket.on('presence:update', (ids: string[]) => setOnlineUserIds(ids));
+    socket.on(
+      'presence:update',
+      (payload: { onlineUserIds: string[]; idleUserIds: string[] }) => {
+        setOnlineUserIds(payload.onlineUserIds || []);
+        setIdleUserIds(payload.idleUserIds || []);
+      }
+    );
 
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -777,55 +807,66 @@ export default function App() {
 
   function sendMessage() {
     if (!socketRef.current || !me || !selectedUserId || !draft.trim()) return;
-
+  
     const text = draft.trim();
     setDraft('');
     stopTyping();
     autoScrollRef.current = true;
-
+  
     socketRef.current.emit('message:send', {
       fromUserId: me.id,
       toUserId: selectedUserId,
       text,
       replyToMessageId: replyingTo?.id || null
     });
-
+  
     setReplyingTo(null);
+  
+    requestAnimationFrame(() => {
+      resizeComposerTextarea(true);
+      focusComposer(false);
+    });
+  
     smoothScrollToBottom(true, false);
   }
 
   async function sendAttachment() {
     if (!me || !selectedUserId || !connectedServerUrl) return;
-
+  
     const files = await desktopApi.onOpenFileDialog();
     if (!files?.length) return;
-
+  
     const filePath = files[0];
     const parts = filePath.split(/[/\\]/);
     const fileName = parts[parts.length - 1];
     const blob = await fetch(pathToFileUrl(filePath)).then((r) => r.blob()).catch(() => null);
-
+  
     if (!blob) {
       alert('Unable to read the selected file');
       return;
     }
-
+  
     const form = new FormData();
     form.append('file', blob, fileName);
     form.append('fromUserId', me.id);
     form.append('toUserId', selectedUserId);
     form.append('text', draft.trim());
-
+  
     if (replyingTo?.id) {
       form.append('replyToMessageId', replyingTo.id);
     }
-
+  
     setDraft('');
     setReplyingTo(null);
-
+  
+    requestAnimationFrame(() => {
+      resizeComposerTextarea(true);
+      focusComposer(false);
+    });
+  
     const res = await fetch(`${connectedServerUrl}/api/upload`, { method: 'POST', body: form });
     const data = await res.json();
-
+  
     if (!res.ok) {
       alert(data.error || 'Upload failed');
       return;
@@ -965,24 +1006,37 @@ export default function App() {
       });
   }
 
-  function resizeComposerTextarea() {
-    const el = composerTextareaRef.current;
+  function resizeComposerTextarea(resetToOneRow = false) {
+    const el = composerInputRef.current;
     if (!el) return;
   
-    el.style.height = '0px';
+    if (resetToOneRow) {
+      el.style.height = 'auto';
+      return;
+    }
+  
+    el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
+
+  function focusComposer(moveCaretToEnd = true) {
+    requestAnimationFrame(() => {
+      const el = composerInputRef.current;
+      if (!el) return;
   
-  function syncMessageViewportState() {
-    const el = messagesRef.current;
-    if (!el) return;
+      el.focus();
   
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const isAwayFromBottom = distanceFromBottom >= 80;
-  
-    autoScrollRef.current = !isAwayFromBottom;
-    setShowScrollToBottom(isAwayFromBottom);
-    updateMessageScrollbar();
+      if (moveCaretToEnd) {
+        const length = el.value.length;
+        el.setSelectionRange(length, length);
+      }
+    });
+  }
+
+  function getPresence(userId: string): 'online' | 'idle' | 'offline' {
+    if (idleUserIds.includes(userId)) return 'idle';
+    if (onlineUserIds.includes(userId)) return 'online';
+    return 'offline';
   }
 
   function userName(userId: string) {
@@ -1094,10 +1148,8 @@ export default function App() {
     setContextMenu(null);
     autoScrollRef.current = true;
   
-    requestAnimationFrame(() => {
-      composerInputRef.current?.focus();
-      smoothScrollToBottom(true, false);
-    });
+    focusComposer();
+    smoothScrollToBottom(true, false);
   }
 
   function scrollToMessage(messageId: string) {
@@ -1148,6 +1200,16 @@ export default function App() {
   }, [selectedUserId, me, connectedServerUrl]);
 
   useEffect(() => {
+    if (!replyingTo) return;
+    focusComposer();
+  }, [replyingTo]);
+
+  useEffect(() => {
+    if (!selectedUserId) return;
+    focusComposer();
+  }, [selectedUserId]);
+
+  useEffect(() => {
     if (!selectedUserId) return;
     markUnreadMessagesAsRead(selectedUserId, activeMessages);
   }, [activeMessages, selectedUserId, isWindowActive]);
@@ -1159,11 +1221,11 @@ export default function App() {
   // }, [activeMessages]);
 
   useEffect(() => {
-    smoothScrollToBottom(false, false);
+    smoothScrollToBottom(true, false);
   }, [activeMessages]);
 
   useEffect(() => {
-    smoothScrollToBottom(false, false);
+    smoothScrollToBottom(true, false);
   }, [selectedUserId]);
 
   useEffect(() => {
@@ -1268,6 +1330,7 @@ export default function App() {
             const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
             const last = conv[conv.length - 1];
             const online = onlineUserIds.includes(user.id);
+            const presence = getPresence(user.id);
 
             return (
               <button
@@ -1279,7 +1342,9 @@ export default function App() {
                   <div className="avatar" style={{ background: avatarBg(user.id) }}>
                     {getInitials(user.name)}
                   </div>
-                  {online ? <span className="online-dot" /> : null}
+                  {presence !== 'offline' ? (
+                    <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
+                  ) : null}
                 </div>
 
                 <div className="contact-text">
@@ -1304,11 +1369,19 @@ export default function App() {
                   <div className="avatar" style={{ background: avatarBg(selectedUser.id) }}>
                     {getInitials(selectedUser.name)}
                   </div>
-                  {onlineUserIds.includes(selectedUser.id) ? <span className="online-dot" /> : null}
+                  {getPresence(selectedUser.id) !== 'offline' ? (
+                    <span className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''}`} />
+                  ) : null}
                 </div>
                 <div>
                   <div className="name">{selectedUser.name}</div>
-                  <div className="sub">{onlineUserIds.includes(selectedUser.id) ? 'Active now' : 'Offline'}</div>
+                  <div className="sub">
+                    {getPresence(selectedUser.id) === 'online'
+                      ? 'Online'
+                      : getPresence(selectedUser.id) === 'idle'
+                      ? 'Idle'
+                      : 'Offline'}
+                  </div>
                 </div>
               </div>
 
@@ -1474,17 +1547,15 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
-
                 <textarea
-                  ref={composerTextareaRef}
+                  ref={composerInputRef}
                   className="composer-input"
                   value={draft}
                   rows={1}
                   onChange={(e) => {
                     setDraft(e.target.value);
                     startTyping();
-                    e.target.style.height = '0px';
-                    e.target.style.height = `${Math.min(e.target.scrollHeight, 140)}px`;
+                    resizeComposerTextarea();
                   }}
                   onBlur={stopTyping}
                   onKeyDown={(e) => {

@@ -73,7 +73,9 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function getMessages(userA, userB) {
     const key = conversationKey(userA, userB);
-    return db.messages.filter((m) => m.conversationKey === key).sort((a, b) => a.createdAt - b.createdAt);
+    return db.messages
+      .filter((m) => m.conversationKey === key)
+      .sort((a, b) => a.createdAt - b.createdAt);
   }
 
   function findMessageById(messageId) {
@@ -218,14 +220,28 @@ function createLanServer({ port = 4000, userDataPath }) {
     limits: { fileSize: 50 * 1024 * 1024 }
   });
 
-  const onlineSockets = new Map(); // userId -> socket.id
+  // userId -> socket.id
+  const onlineSockets = new Map();
+
+  // userIds currently online but idle
+  const idleUserIds = new Set();
+
+  function getPresencePayload() {
+    const onlineUserIds = [...onlineSockets.keys()];
+    const onlineUserIdSet = new Set(onlineUserIds);
+
+    return {
+      onlineUserIds,
+      idleUserIds: [...idleUserIds].filter((userId) => onlineUserIdSet.has(userId))
+    };
+  }
 
   function emitUsersChanged() {
     io.emit('users:changed');
   }
 
   function emitPresence() {
-    io.emit('presence:update', [...onlineSockets.keys()]);
+    io.emit('presence:update', getPresencePayload());
   }
 
   function emitMessageToParticipants(message) {
@@ -283,15 +299,25 @@ function createLanServer({ port = 4000, userDataPath }) {
     const user = upsertUser(name);
     emitUsersChanged();
 
-    res.json({ user, users: db.users });
+    res.json({
+      user,
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/users', (_req, res) => {
-    res.json({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+    res.json({
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/roster', (_req, res) => {
-    res.json({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+    res.json({
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/messages/:me/:peer', (req, res) => {
@@ -355,11 +381,29 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       socket.data.userId = userId;
       onlineSockets.set(userId, socket.id);
+      idleUserIds.delete(userId);
       emitPresence();
     });
 
     socket.on('users:sync', (callback) => {
-      callback?.({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+      callback?.({
+        users: db.users,
+        ...getPresencePayload()
+      });
+    });
+
+    socket.on('presence:set-state', ({ state }) => {
+      const userId = socket.data.userId;
+      if (!userId) return;
+      if (!onlineSockets.has(userId)) return;
+
+      if (state === 'idle') {
+        idleUserIds.add(userId);
+      } else {
+        idleUserIds.delete(userId);
+      }
+
+      emitPresence();
     });
 
     socket.on('message:send', ({ fromUserId, toUserId, text, replyToMessageId }, callback) => {
@@ -537,6 +581,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       if (onlineSockets.get(userId) === socket.id) {
         onlineSockets.delete(userId);
+        idleUserIds.delete(userId);
         emitUsersChanged();
         emitPresence();
       }
