@@ -272,6 +272,12 @@ export default function App() {
   const incomingFromUserIdRef = useRef<string | null>(null);
   const composerInputRef = useRef<HTMLInputElement | null>(null);
   const composerRef = useRef<HTMLElement | null>(null);
+  const [isWindowActive, setIsWindowActive] = useState(
+    () => document.visibilityState === 'visible' && document.hasFocus()
+  );
+  
+  const isWindowActiveRef = useRef(isWindowActive);
+  const activeMessagesRef = useRef<Message[]>([]);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -301,6 +307,29 @@ export default function App() {
   useEffect(() => {
     incomingFromUserIdRef.current = incomingFromUserId;
   }, [incomingFromUserId]);
+
+  useEffect(() => {
+    isWindowActiveRef.current = isWindowActive;
+  }, [isWindowActive]);
+  
+  useEffect(() => {
+    const updateWindowActive = () => {
+      const active = document.visibilityState === 'visible' && document.hasFocus();
+      setIsWindowActive(active);
+    };
+  
+    updateWindowActive();
+  
+    window.addEventListener('focus', updateWindowActive);
+    window.addEventListener('blur', updateWindowActive);
+    document.addEventListener('visibilitychange', updateWindowActive);
+  
+    return () => {
+      window.removeEventListener('focus', updateWindowActive);
+      window.removeEventListener('blur', updateWindowActive);
+      document.removeEventListener('visibilitychange', updateWindowActive);
+    };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = desktopApi.onNavigateToChat?.(({ userId, kind }) => {
@@ -503,8 +532,8 @@ export default function App() {
           messageId: message.id,
           byUserId: loginData.user.id
         });
-
-        if (selectedUserIdRef.current === message.fromUserId && document.visibilityState === 'visible') {
+      
+        if (canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
             byUserId: loginData.user.id
@@ -901,6 +930,35 @@ export default function App() {
     setCallState((prev) => (prev ? { ...prev, cameraOff: nextOff } : prev));
   }
 
+  function canMarkConversationAsRead(peerUserId: string) {
+    return (
+      !!me &&
+      selectedUserIdRef.current === peerUserId &&
+      autoScrollRef.current &&
+      isWindowActiveRef.current
+    );
+  }
+  
+  function markUnreadMessagesAsRead(peerUserId: string, sourceMessages: Message[]) {
+    if (!socketRef.current || !me) return;
+    if (!canMarkConversationAsRead(peerUserId)) return;
+  
+    sourceMessages
+      .filter(
+        (m) =>
+          m.fromUserId === peerUserId &&
+          m.toUserId === me.id &&
+          m.type !== 'deleted' &&
+          !m.readAt
+      )
+      .forEach((m) => {
+        socketRef.current?.emit('message:read', {
+          messageId: m.id,
+          byUserId: me.id
+        });
+      });
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -919,10 +977,23 @@ export default function App() {
   function MessageStatus({ message }: { message: Message }) {
     const status = messageStatusType(message);
     if (status === 'none') return null;
-
+  
+    if (status === 'sent') {
+      return (
+        <span className={`tg-status ${status}`} aria-label="sent">
+          <svg className="tg-status-svg tg-status-single" viewBox="0 0 12 10">
+            <path d="M1.6 5.3L4.5 8.1L10.2 2.2" />
+          </svg>
+        </span>
+      );
+    }
+  
     return (
-      <span className={`msg-status ${status}`} aria-label={status}>
-        {status === 'sent' ? <span className="msg-check single">✓</span> : <span className="msg-check double">✓✓</span>}
+      <span className={`tg-status ${status}`} aria-label={status}>
+        <svg className="tg-status-svg tg-status-double" viewBox="0 0 18 10">
+          <path d="M1.6 5.3L4.5 8.1L10.2 2.2" />
+          <path d="M7.2 5.3L10.1 8.1L15.8 2.2" />
+        </svg>
       </span>
     );
   }
@@ -949,10 +1020,15 @@ export default function App() {
   function handleMessagesScroll() {
     const el = messagesRef.current;
     if (!el) return;
-
+  
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     autoScrollRef.current = distanceFromBottom < 80;
+  
     updateMessageScrollbar();
+  
+    if (selectedUserIdRef.current && autoScrollRef.current) {
+      markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
+    }
   }
 
   function deletedMessageLabel(message: Message, meId: string) {
@@ -1034,6 +1110,10 @@ export default function App() {
     return messagesByConv[conversationKey(me.id, selectedUserId)] || [];
   }, [messagesByConv, me, selectedUserId]);
 
+  useEffect(() => {
+    activeMessagesRef.current = activeMessages;
+  }, [activeMessages]);
+
   const contextTargetMessage = useMemo(() => {
     if (!contextMenu) return null;
     return activeMessages.find((m) => m.id === contextMenu.messageId) || null;
@@ -1045,19 +1125,9 @@ export default function App() {
   }, [selectedUserId, me, connectedServerUrl]);
 
   useEffect(() => {
-    if (!socketRef.current || !me || !selectedUserId) return;
-
-    const unreadIncoming = activeMessages.filter(
-      (m) => m.fromUserId === selectedUserId && m.toUserId === me.id && m.type !== 'deleted' && !m.readAt
-    );
-
-    unreadIncoming.forEach((m) => {
-      socketRef.current?.emit('message:read', {
-        messageId: m.id,
-        byUserId: me.id
-      });
-    });
-  }, [activeMessages, me, selectedUserId]);
+    if (!selectedUserId) return;
+    markUnreadMessagesAsRead(selectedUserId, activeMessages);
+  }, [activeMessages, selectedUserId, isWindowActive]);
 
   useEffect(() => {
     smoothScrollToBottom(false, false);
