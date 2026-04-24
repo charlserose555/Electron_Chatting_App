@@ -1,0 +1,58 @@
+{
+  "name": "lan-chat-electron-next",
+  "version": "1.1.0",
+  "description": "LAN one-to-one chat and video desktop app",
+  "main": "electron/main.cjs",
+  "private": true,
+  "scripts": {
+    "dev:client": "vite --config vite.config.ts",
+    "build:client": "vite build --config vite.config.ts",
+    "start:desktop": "electron .",
+    "dist:win": "npm run build:client && electron-builder --win nsis portable"
+  },
+  "build": {
+    "appId": "com.localnet.chatdesktop",
+    "productName": "LAN Chat Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "client/dist/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "LAN Chat Desktop"
+    }
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^41.0.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.7.3",
+    "vite": "^7.1.12"
+  }
+}
