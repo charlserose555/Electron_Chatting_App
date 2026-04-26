@@ -19,6 +19,8 @@ type ReplyTo = {
   isImage: boolean;
 };
 
+type CallMode = 'audio' | 'video';
+
 type Message = {
   id: string;
   conversationKey: string;
@@ -26,7 +28,8 @@ type Message = {
   toUserId: string;
   text: string;
   attachment: Attachment | null;
-  type: 'text' | 'file' | 'deleted' | 'call' | 'system';
+  attachments: Attachment[] | null;
+  type: 'text' | 'file' | 'gallery' | 'deleted' | 'call' | 'system';
   replyTo: ReplyTo | null;
   system: null | {
     kind: 'file_upload' | 'info';
@@ -39,6 +42,7 @@ type Message = {
   };
   call: null | {
     status: 'incoming' | 'accepted' | 'declined' | 'unanswered';
+    mode?: CallMode;
     createdAt: number;
   };
   createdAt: number;
@@ -48,9 +52,20 @@ type Message = {
   readAt: number | null;
 };
 
+type PendingUpload = {
+  id: string;
+  file: Blob;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  isImage: boolean;
+  previewUrl: string | null;
+};
+
 type CallState =
   | {
       peerUserId: string;
+      mode: CallMode;
       phase: 'outgoing' | 'incoming' | 'connecting' | 'connected';
       muted: boolean;
       cameraOff: boolean;
@@ -99,30 +114,37 @@ function avatarBg(seed: string) {
   return `linear-gradient(135deg, ${a}, ${b})`;
 }
 
-function callHistoryLabel(message: Message, meId: string, users: User[]) {
+function callHistoryLabel(message: Message, meId: string, _users: User[]) {
   const status = message.call?.status;
-  if (!status) return 'Call';
+  const modeLabel = message.call?.mode === 'audio' ? 'voice' : 'video';
 
-  const fromName = users.find((u) => u.id === message.fromUserId)?.name || 'Someone';
-  const toName = users.find((u) => u.id === message.toUserId)?.name || 'Someone';
+  if (!status) {
+    return `${modeLabel[0].toUpperCase()}${modeLabel.slice(1)} call`;
+  }
 
   if (status === 'incoming') {
-    return message.fromUserId === meId ? 'You started a call' : `Incoming call from ${fromName}`;
+    return message.fromUserId === meId
+      ? `Outgoing ${modeLabel} call`
+      : `Incoming ${modeLabel} call`;
   }
 
   if (status === 'accepted') {
-    return message.fromUserId === meId ? 'You accepted the call' : `Call accepted by ${fromName}`;
+    return `${modeLabel[0].toUpperCase()}${modeLabel.slice(1)} call accepted`;
   }
 
   if (status === 'declined') {
-    return message.fromUserId === meId ? 'You declined the call' : `Call declined by ${fromName}`;
+    return message.fromUserId === meId
+      ? `Declined ${modeLabel} call`
+      : `${modeLabel[0].toUpperCase()}${modeLabel.slice(1)} call declined`;
   }
 
   if (status === 'unanswered') {
-    return message.fromUserId === meId ? `No answer from ${toName}` : `Missed call from ${fromName}`;
+    return message.fromUserId === meId
+      ? `No answer — ${modeLabel} call`
+      : `Missed ${modeLabel} call`;
   }
 
-  return 'Call';
+  return `${modeLabel[0].toUpperCase()}${modeLabel.slice(1)} call`;
 }
 
 function systemChipClass(message: Message) {
@@ -146,12 +168,24 @@ function systemChipIcon(message: Message, meId: string) {
 
   if (message.type === 'call') {
     const status = message.call?.status;
+    const mode = message.call?.mode === 'audio' ? 'audio' : 'video';
     const iAmCaller = message.fromUserId === meId;
 
-    if (status === 'accepted') return '✅';
-    if (status === 'declined') return '❌';
-    if (status === 'unanswered') return iAmCaller ? '☎' : '📵';
-    if (status === 'incoming') return '📞';
+    if (status === 'incoming') {
+      return mode === 'audio' ? '📞' : '🎥';
+    }
+
+    if (status === 'accepted') {
+      return mode === 'audio' ? '📞' : '🎥';
+    }
+
+    if (status === 'declined') {
+      return '❌';
+    }
+
+    if (status === 'unanswered') {
+      return iAmCaller ? '☎' : '📵';
+    }
   }
 
   return '•';
@@ -177,6 +211,26 @@ function systemMessageLabel(message: Message, meId: string, users: User[]) {
   return message.system.text || 'System message';
 }
 
+function getMessageAttachments(message: Message) {
+  if (Array.isArray(message.attachments) && message.attachments.length) {
+    return message.attachments;
+  }
+
+  if (message.attachment) {
+    return [message.attachment];
+  }
+
+  return [];
+}
+  
+function isGalleryMessage(message: Message) {
+  const attachments = getMessageAttachments(message);
+  return (
+    message.type === 'gallery' ||
+    (attachments.length > 1 && attachments.every((item) => item.isImage))
+  );
+}
+
 function previewText(message: Message | undefined, meId: string, users: User[]) {
   if (!message) return 'No messages yet';
   if (message.type === 'deleted') return 'Message deleted';
@@ -184,8 +238,16 @@ function previewText(message: Message | undefined, meId: string, users: User[]) 
   if (message.type === 'call') return callHistoryLabel(message, meId, users);
   if (message.type === 'system') return systemMessageLabel(message, meId, users);
 
-  if (message.attachment) {
-    return message.attachment.isImage ? 'Sent an image' : `Sent ${message.attachment.filename}`;
+  const attachments = getMessageAttachments(message);
+
+  if (isGalleryMessage(message)) {
+    return message.text
+      ? `🖼 ${attachments.length} photos · ${message.text}`
+      : `🖼 ${attachments.length} photos`;
+  }
+
+  if (attachments.length === 1) {
+    return attachments[0].isImage ? 'Sent an image' : `Sent ${attachments[0].filename}`;
   }
 
   return message.text;
@@ -229,6 +291,43 @@ function AttachmentPreview({
   );
 }
 
+function GalleryPreview({
+  attachments,
+  serverUrl
+}: {
+  attachments: Attachment[];
+  serverUrl: string;
+}) {
+  const visible = attachments.slice(0, 4);
+  const extraCount = attachments.length - visible.length;
+
+  return (
+    <div
+      className={`gallery-attachment grid-${Math.min(visible.length, 4)}`}
+    >
+      {visible.map((item, index) => {
+        const href = `${serverUrl}${item.url}`;
+        const showOverlay = index === visible.length - 1 && extraCount > 0;
+
+        return (
+          <a
+            key={`${item.url}_${index}`}
+            className="gallery-item"
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+          >
+            <img src={href} alt={item.filename} className="gallery-item-image" />
+            {showOverlay ? (
+              <div className="gallery-more-overlay">+{extraCount}</div>
+            ) : null}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 const storedUser = localStorage.getItem('lan_chat_user_name') || '';
 const storedServer = localStorage.getItem('lan_chat_server_url') || '';
 const storedHost = localStorage.getItem('lan_chat_host_mode') === '1';
@@ -256,6 +355,8 @@ export default function App() {
   const [scrollThumb, setScrollThumb] = useState({ top: 0, height: 0 });
   const [replyingTo, setReplyingTo] = useState<Message | null>(null);
   const [contextMenu, setContextMenu] = useState<null | { messageId: string; x: number; y: number }>(null);
+  const [incomingCallMode, setIncomingCallMode] = useState<CallMode | null>(null);
+  const incomingCallModeRef = useRef<CallMode | null>(null);
 
   const usersRef = useRef<User[]>([]);
   const selectedUserIdRef = useRef('');
@@ -283,6 +384,11 @@ export default function App() {
   const [deleteChatTargetUserId, setDeleteChatTargetUserId] = useState<string | null>(null);
   const deleteChatTarget = users.find((u) => u.id === deleteChatTargetUserId) || null;
   const [deleteMessageTargetId, setDeleteMessageTargetId] = useState<string | null>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
+  const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
+  const pendingUploadsRef = useRef<PendingUpload[]>([]);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -317,6 +423,48 @@ export default function App() {
     isWindowActiveRef.current = isWindowActive;
   }, [isWindowActive]);
   
+  useEffect(() => {
+    incomingCallModeRef.current = incomingCallMode;
+  }, [incomingCallMode]);
+
+  useEffect(() => {
+    pendingUploadsRef.current = pendingUploads;
+  }, [pendingUploads]);
+  
+  useEffect(() => {
+    return () => {
+      pendingUploadsRef.current.forEach((item) => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    function preventWindowDrop(event: DragEvent) {
+      if (Array.from(event.dataTransfer?.types || []).includes('Files')) {
+        event.preventDefault();
+      }
+    }
+  
+    window.addEventListener('dragover', preventWindowDrop);
+    window.addEventListener('drop', preventWindowDrop);
+  
+    return () => {
+      window.removeEventListener('dragover', preventWindowDrop);
+      window.removeEventListener('drop', preventWindowDrop);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!remoteAudioRef.current) return;
+  
+    if (callState?.mode === 'audio' && remoteStreamState) {
+      remoteAudioRef.current.srcObject = remoteStreamState;
+    } else {
+      remoteAudioRef.current.srcObject = null;
+    }
+  }, [callState, remoteStreamState]);
+
   useEffect(() => {
     const updateWindowActive = () => {
       const active = document.visibilityState === 'visible' && document.hasFocus();
@@ -442,6 +590,9 @@ export default function App() {
     setReplyingTo(null);
     setDeleteChatTargetUserId(null);
     setDeleteMessageTargetId(null);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
+    clearPendingUploads();
   }, [selectedUserId]);
 
   async function handleConnect() {
@@ -586,9 +737,13 @@ export default function App() {
 
       if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
         const senderName = usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
+        const attachments = getMessageAttachments(message);
+
         const body =
-          message.type === 'file'
-            ? `${senderName} sent ${message.attachment?.isImage ? 'an image' : 'a file'}: ${message.attachment?.filename || ''}`
+          isGalleryMessage(message)
+            ? `${senderName} sent ${attachments.length} photos${message.text ? `: ${message.text}` : ''}`
+            : message.type === 'file'
+            ? `${senderName} sent ${attachments[0]?.isImage ? 'an image' : 'a file'}: ${attachments[0]?.filename || ''}`
             : message.text;
 
         desktopApi.notify({
@@ -626,15 +781,24 @@ export default function App() {
       setTypingFrom((prev) => ({ ...prev, [fromUserId]: isTyping }));
     });
 
-    socket.on('call:invite', ({ fromUserId }: { fromUserId: string }) => {
+    socket.on('call:invite', ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
+      const callMode = mode === 'audio' ? 'audio' : 'video';
+    
       incomingFromUserIdRef.current = fromUserId;
+      incomingCallModeRef.current = callMode;
+    
       setIncomingFromUserId(fromUserId);
-
+      setIncomingCallMode(callMode);
+    
       const senderName = usersRef.current.find((u) => u.id === fromUserId)?.name || 'Incoming call';
-      setCallStatus(`${senderName} is calling...`);
-
+      setCallStatus(
+        callMode === 'audio'
+          ? `${senderName} is voice calling...`
+          : `${senderName} is video calling...`
+      );
+    
       desktopApi.notify({
-        title: 'Incoming call',
+        title: callMode === 'audio' ? 'Incoming voice call' : 'Incoming video call',
         body: `${senderName} is calling you`,
         userId: fromUserId,
         kind: 'call'
@@ -655,17 +819,23 @@ export default function App() {
       }
     );
 
-    socket.on('call:accepted', async ({ fromUserId }: { fromUserId: string }) => {
+    socket.on('call:accepted', async ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
       if (currentCallRef.current?.peerUserId !== fromUserId) return;
-
-      setCallState((prev) => (prev ? { ...prev, phase: 'connecting' } : prev));
-      setCallStatus('Creating secure local video connection...');
-
-      const stream = await ensureLocalStream();
+    
+      const callMode = currentCallRef.current?.mode || mode || 'video';
+    
+      setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
+      setCallStatus(
+        callMode === 'audio'
+          ? 'Creating secure local voice connection...'
+          : 'Creating secure local video connection...'
+      );
+    
+      const stream = await ensureLocalStream(callMode);
       const peer = createPeer(fromUserId, stream);
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
-
+    
       socket.emit('signal', {
         fromUserId: loginData.user.id,
         toUserId: fromUserId,
@@ -703,7 +873,8 @@ export default function App() {
       }) => {
         try {
           if (data.type === 'offer') {
-            const stream = await ensureLocalStream();
+            const callMode = currentCallRef.current?.mode || incomingCallModeRef.current || 'video';
+            const stream = await ensureLocalStream(callMode);
             const peer = createPeer(fromUserId, stream);
             await peer.setRemoteDescription(new RTCSessionDescription(data.payload));
             const answer = await peer.createAnswer();
@@ -717,9 +888,10 @@ export default function App() {
 
             const nextCallState: CallState = {
               peerUserId: fromUserId,
+              mode: callMode,
               phase: 'connecting',
               muted: false,
-              cameraOff: false
+              cameraOff: callMode === 'audio'
             };
 
             currentCallRef.current = nextCallState;
@@ -778,10 +950,82 @@ export default function App() {
     return peer;
   }
 
-  async function ensureLocalStream() {
-    if (localStreamRef.current) return localStreamRef.current;
+  function guessMimeTypeFromName(fileName: string) {
+    const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  
+    if (ext === 'png') return 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+    if (ext === 'webp') return 'image/webp';
+    if (ext === 'gif') return 'image/gif';
+    if (ext === 'bmp') return 'image/bmp';
+    if (ext === 'svg') return 'image/svg+xml';
+    if (ext === 'pdf') return 'application/pdf';
+    if (ext === 'txt') return 'text/plain';
+    return '';
+  }
+  
+  function revokePendingUpload(item: PendingUpload) {
+    if (item.previewUrl) {
+      URL.revokeObjectURL(item.previewUrl);
+    }
+  }
+  
+  function createPendingUpload(input: {
+    file: Blob;
+    fileName: string;
+    mimeType?: string;
+  }): PendingUpload {
+    const mimeType =
+      input.mimeType ||
+      (input.file instanceof File ? input.file.type : '') ||
+      guessMimeTypeFromName(input.fileName);
+  
+    const isImage = mimeType.startsWith('image/');
+    const previewUrl = isImage ? URL.createObjectURL(input.file) : null;
+  
+    return {
+      id: `pu_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      file: input.file,
+      fileName: input.fileName,
+      mimeType,
+      size: input.file.size,
+      isImage,
+      previewUrl
+    };
+  }
+  
+  function addPendingUploads(items: Array<{ file: Blob; fileName: string; mimeType?: string }>) {
+    if (!items.length) return;
+  
+    const nextItems = items.map(createPendingUpload);
+    setPendingUploads((prev) => [...prev, ...nextItems]);
+  }
+  
+  function removePendingUpload(id: string) {
+    setPendingUploads((prev) => {
+      const target = prev.find((item) => item.id === id);
+      if (target) revokePendingUpload(target);
+      return prev.filter((item) => item.id !== id);
+    });
+  }
+  
+  function clearPendingUploads() {
+    setPendingUploads((prev) => {
+      prev.forEach(revokePendingUpload);
+      return [];
+    });
+  }
 
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  async function ensureLocalStream(mode: CallMode) {
+    if (localStreamRef.current) return localStreamRef.current;
+  
+    const constraints =
+      mode === 'audio'
+        ? { audio: true }
+        : { audio: true, video: true };
+  
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  
     localStreamRef.current = stream;
     setLocalStreamState(stream);
     return stream;
@@ -813,6 +1057,12 @@ export default function App() {
     setRemoteStreamState(null);
     setCallState(null);
     setIncomingFromUserId(null);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
+
+    if (remoteAudioRef.current) {
+      remoteAudioRef.current.srcObject = null;
+    }
   }
 
   function updateMessageScrollbar() {
@@ -855,7 +1105,12 @@ export default function App() {
     }
   }
 
-  function sendMessage() {
+  async function sendMessage() {
+    if (pendingUploads.length > 0) {
+      await uploadPreparedFiles(pendingUploads);
+      return;
+    }
+  
     if (!socketRef.current || !me || !selectedUserId || !draft.trim()) return;
   
     const text = draft.trim();
@@ -883,44 +1138,33 @@ export default function App() {
   async function sendAttachment() {
     if (!me || !selectedUserId || !connectedServerUrl) return;
   
-    const files = await desktopApi.onOpenFileDialog();
-    if (!files?.length) return;
+    const filePaths = await desktopApi.onOpenFileDialog();
+    if (!filePaths?.length) return;
   
-    const filePath = files[0];
-    const parts = filePath.split(/[/\\]/);
-    const fileName = parts[parts.length - 1];
-    const blob = await fetch(pathToFileUrl(filePath)).then((r) => r.blob()).catch(() => null);
+    const prepared: Array<{ file: Blob; fileName: string; mimeType?: string }> = [];
   
-    if (!blob) {
-      alert('Unable to read the selected file');
-      return;
+    for (const filePath of filePaths) {
+      const parts = filePath.split(/[/\\]/);
+      const fileName = parts[parts.length - 1];
+  
+      const blob = await fetch(pathToFileUrl(filePath))
+        .then((r) => r.blob())
+        .catch(() => null);
+  
+      if (!blob) {
+        alert(`Unable to read the selected file: ${fileName}`);
+        return;
+      }
+  
+      prepared.push({
+        file: blob,
+        fileName,
+        mimeType: blob.type || guessMimeTypeFromName(fileName)
+      });
     }
   
-    const form = new FormData();
-    form.append('file', blob, fileName);
-    form.append('fromUserId', me.id);
-    form.append('toUserId', selectedUserId);
-    form.append('text', draft.trim());
-  
-    if (replyingTo?.id) {
-      form.append('replyToMessageId', replyingTo.id);
-    }
-  
-    setDraft('');
-    setReplyingTo(null);
-  
-    requestAnimationFrame(() => {
-      resizeComposerTextarea(true);
-      focusComposer(false);
-    });
-  
-    const res = await fetch(`${connectedServerUrl}/api/upload`, { method: 'POST', body: form });
-    const data = await res.json();
-  
-    if (!res.ok) {
-      alert(data.error || 'Upload failed');
-      return;
-    }
+    addPendingUploads(prepared);
+    focusComposer();
   }
 
   function pathToFileUrl(filePath: string) {
@@ -996,42 +1240,71 @@ export default function App() {
     typingTimerRef.current = null;
   }
 
-  function startCall() {
+  function startCall(mode: CallMode) {
     if (!socketRef.current || !me || !selectedUserId) return;
-
+  
     const nextCallState: CallState = {
       peerUserId: selectedUserId,
+      mode,
       phase: 'outgoing',
       muted: false,
-      cameraOff: false
+      cameraOff: mode === 'audio'
     };
-
+  
     currentCallRef.current = nextCallState;
     setCallState(nextCallState);
-    setCallStatus(`Calling ${userName(selectedUserId)}...`);
-
-    ensureLocalStream().catch(() => setCallStatus('Camera/microphone permission denied'));
-    socketRef.current.emit('call:invite', { fromUserId: me.id, toUserId: selectedUserId });
+    setCallStatus(
+      mode === 'audio'
+        ? `Voice calling ${userName(selectedUserId)}...`
+        : `Video calling ${userName(selectedUserId)}...`
+    );
+  
+    ensureLocalStream(mode).catch(() =>
+      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
+    );
+  
+    socketRef.current.emit('call:invite', {
+      fromUserId: me.id,
+      toUserId: selectedUserId,
+      mode
+    });
   }
 
   function acceptCall() {
     if (!incomingFromUserId || !socketRef.current || !me) return;
-
+  
+    const mode = incomingCallModeRef.current || 'video';
+  
     const nextCallState: CallState = {
       peerUserId: incomingFromUserId,
+      mode,
       phase: 'incoming',
       muted: false,
-      cameraOff: false
+      cameraOff: mode === 'audio'
     };
-
+  
     currentCallRef.current = nextCallState;
     incomingFromUserIdRef.current = null;
     setCallState(nextCallState);
-
-    ensureLocalStream().catch(() => setCallStatus('Camera/microphone permission denied'));
-    socketRef.current.emit('call:accept', { fromUserId: me.id, toUserId: incomingFromUserId });
+  
+    ensureLocalStream(mode).catch(() =>
+      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
+    );
+  
+    socketRef.current.emit('call:accept', {
+      fromUserId: me.id,
+      toUserId: incomingFromUserId
+    });
+  
     setIncomingFromUserId(null);
-    setCallStatus(`Connecting to ${userName(incomingFromUserId)}...`);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
+  
+    setCallStatus(
+      mode === 'audio'
+        ? `Connecting voice call to ${userName(incomingFromUserId)}...`
+        : `Connecting video call to ${userName(incomingFromUserId)}...`
+    );
   }
 
   function declineCall() {
@@ -1039,6 +1312,8 @@ export default function App() {
     socketRef.current.emit('call:decline', { fromUserId: me.id, toUserId: incomingFromUserId });
     incomingFromUserIdRef.current = null;
     setIncomingFromUserId(null);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
   }
 
   function toggleMute() {
@@ -1050,8 +1325,8 @@ export default function App() {
   }
 
   function toggleCamera() {
-    if (!currentCallRef.current || !localStreamRef.current) return;
-
+    if (!currentCallRef.current || currentCallRef.current.mode === 'audio' || !localStreamRef.current) return;
+  
     const nextOff = !currentCallRef.current.cameraOff;
     localStreamRef.current.getVideoTracks().forEach((track) => (track.enabled = !nextOff));
     setCallState((prev) => (prev ? { ...prev, cameraOff: nextOff } : prev));
@@ -1165,6 +1440,158 @@ export default function App() {
     return users.find((u) => u.id === userId)?.name || userId;
   }
 
+  function isFileDrag(event: React.DragEvent | DragEvent) {
+    return Array.from(event.dataTransfer?.types || []).includes('Files');
+  }
+  
+  async function uploadPreparedFiles(files: PendingUpload[]) {
+    if (!me || !selectedUserId || !connectedServerUrl) return false;
+    if (!files.length) return false;
+  
+    const textForMessage = draft.trim();
+    const replyTarget = replyingTo;
+    const canSendAsGallery = files.length > 1 && files.every((item) => item.isImage);
+  
+    stopTyping();
+    autoScrollRef.current = true;
+  
+    if (canSendAsGallery) {
+      const form = new FormData();
+  
+      files.forEach((item) => {
+        form.append('files', item.file, item.fileName);
+      });
+  
+      form.append('fromUserId', me.id);
+      form.append('toUserId', selectedUserId);
+      form.append('text', textForMessage);
+  
+      if (replyTarget?.id) {
+        form.append('replyToMessageId', replyTarget.id);
+      }
+  
+      const res = await fetch(`${connectedServerUrl}/api/upload`, {
+        method: 'POST',
+        body: form
+      });
+  
+      const data = await res.json().catch(() => ({}));
+  
+      if (!res.ok) {
+        alert(data.error || 'Gallery upload failed');
+        return false;
+      }
+    } else {
+      for (let i = 0; i < files.length; i++) {
+        const item = files[i];
+        const form = new FormData();
+  
+        form.append('file', item.file, item.fileName);
+        form.append('fromUserId', me.id);
+        form.append('toUserId', selectedUserId);
+        form.append('text', i === 0 ? textForMessage : '');
+  
+        if (i === 0 && replyTarget?.id) {
+          form.append('replyToMessageId', replyTarget.id);
+        }
+  
+        const res = await fetch(`${connectedServerUrl}/api/upload`, {
+          method: 'POST',
+          body: form
+        });
+  
+        const data = await res.json().catch(() => ({}));
+  
+        if (!res.ok) {
+          alert(data.error || `Upload failed: ${item.fileName}`);
+          return false;
+        }
+      }
+    }
+  
+    clearPendingUploads();
+    setDraft('');
+    setReplyingTo(null);
+  
+    requestAnimationFrame(() => {
+      resizeComposerTextarea(true);
+      focusComposer(false);
+    });
+  
+    smoothScrollToBottom(true, false);
+    return true;
+  }
+  
+  function handleChatDragEnter(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    setIsDragOver(true);
+  }
+
+  function handleComposerPaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const items = Array.from(event.clipboardData?.items || []);
+  
+    const pastedFiles = items
+      .filter((item) => item.kind === 'file')
+      .map((item, index) => {
+        const file = item.getAsFile();
+        if (!file) return null;
+  
+        const fallbackName = file.type.startsWith('image/')
+          ? `pasted-image-${Date.now()}-${index + 1}.png`
+          : `pasted-file-${Date.now()}-${index + 1}`;
+  
+        return {
+          file,
+          fileName: file.name || fallbackName,
+          mimeType: file.type
+        };
+      })
+      .filter(Boolean) as Array<{ file: Blob; fileName: string; mimeType?: string }>;
+  
+    if (!pastedFiles.length) return;
+  
+    event.preventDefault();
+    addPendingUploads(pastedFiles);
+  }
+  
+  function handleChatDragOver(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  }
+  
+  function handleChatDragLeave(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+  
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) {
+      setIsDragOver(false);
+    }
+  }
+  
+  async function handleChatDrop(event: React.DragEvent<HTMLElement>) {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+  
+    dragDepthRef.current = 0;
+    setIsDragOver(false);
+  
+    const droppedFiles = Array.from(event.dataTransfer.files || []);
+    if (!droppedFiles.length) return;
+  
+    addPendingUploads(
+      droppedFiles.map((file) => ({
+        file,
+        fileName: file.name,
+        mimeType: file.type
+      }))
+    );
+  
+    focusComposer();
+  }
   function userNameFromList(userId: string, list: User[]) {
     return list.find((u) => u.id === userId)?.name || userId;
   }
@@ -1301,9 +1728,16 @@ export default function App() {
   }
 
   function replyPreviewTextFromMessage(message: Message) {
-    if (message.attachment) {
-      return message.attachment.isImage ? 'Photo' : message.attachment.filename;
+    const attachments = getMessageAttachments(message);
+  
+    if (isGalleryMessage(message)) {
+      return message.text || `${attachments.length} photos`;
     }
+  
+    if (attachments.length === 1) {
+      return attachments[0].isImage ? 'Photo' : attachments[0].filename;
+    }
+  
     if (message.type === 'deleted') return 'Message deleted';
     return message.text || 'Message';
   }
@@ -1533,7 +1967,13 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="chat-panel">
+      <main
+        className={`chat-panel ${isDragOver ? 'drag-active' : ''}`}
+        onDragEnter={handleChatDragEnter}
+        onDragOver={handleChatDragOver}
+        onDragLeave={handleChatDragLeave}
+        onDrop={handleChatDrop}
+      >
         {selectedUser ? (
           <>
             <header className="chat-header">
@@ -1559,10 +1999,10 @@ export default function App() {
               </div>
 
               <div className="header-actions">
-                <button className="icon-btn" onClick={startCall}>
+                <button className="icon-btn" onClick={() => startCall('audio')} title="Audio call">
                   📞
                 </button>
-                <button className="icon-btn" onClick={startCall}>
+                <button className="icon-btn" onClick={() => startCall('video')} title="Video call">
                   🎥
                 </button>
                 <button
@@ -1588,7 +2028,9 @@ export default function App() {
                   const nextIsSameSenderGroup = isRenderableMessage(next) && next!.fromUserId === m.fromUserId;
                   const showAvatarForThisMessage = !nextIsSameSenderGroup;
 
-                  const useTelegramInlineMeta = !!m.text && !m.attachment;
+                  const attachments = getMessageAttachments(m);
+                  const isGallery = isGalleryMessage(m);
+                  const useTelegramInlineMeta = !!m.text && attachments.length === 0;
 
                   return (
                     <div key={m.id} data-message-id={m.id}>
@@ -1640,6 +2082,10 @@ export default function App() {
                                 </button>
                               ) : null}
 
+                              {isGallery ? (
+                                <GalleryPreview attachments={attachments} serverUrl={connectedServerUrl} />
+                              ) : null}
+
                               {m.text ? (
                                 useTelegramInlineMeta ? (
                                   <div className="message-text with-inline-meta">
@@ -1656,12 +2102,14 @@ export default function App() {
                                     </span>
                                   </div>
                                 ) : (
-                                  <div className="message-text">{m.text}</div>
+                                  <div className={`message-text ${isGallery ? 'gallery-caption' : ''}`}>
+                                    {m.text}
+                                  </div>
                                 )
                               ) : null}
 
-                              {m.attachment ? (
-                                <AttachmentPreview attachment={m.attachment} serverUrl={connectedServerUrl} />
+                              {!isGallery && attachments.length === 1 ? (
+                                <AttachmentPreview attachment={attachments[0]} serverUrl={connectedServerUrl} />
                               ) : null}
 
                               {!useTelegramInlineMeta ? (
@@ -1726,6 +2174,38 @@ export default function App() {
               <button className="emoji-btn">☺</button>
 
               <div className="composer-center">
+                {pendingUploads.length ? (
+                  <div className="composer-attachments">
+                    {pendingUploads.map((item) => (
+                      <div key={item.id} className="composer-attachment">
+                        {item.isImage && item.previewUrl ? (
+                          <img
+                            className="composer-attachment-thumb"
+                            src={item.previewUrl}
+                            alt={item.fileName}
+                          />
+                        ) : (
+                          <div className="composer-attachment-file">📄</div>
+                        )}
+
+                        <div className="composer-attachment-meta">
+                          <div className="composer-attachment-name">{item.fileName}</div>
+                          <div className="composer-attachment-sub">
+                            {item.isImage ? 'Photo' : `${Math.max(1, Math.round(item.size / 1024))} KB`}
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="composer-attachment-remove"
+                          onClick={() => removePendingUpload(item.id)}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {replyingTo ? (
                   <div className="reply-draft">
                     <div className="reply-draft-bar" />
@@ -1759,14 +2239,15 @@ export default function App() {
                     startTyping();
                     resizeComposerTextarea();
                   }}
+                  onPaste={handleComposerPaste}
                   onBlur={stopTyping}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
-                      sendMessage();
+                      void sendMessage();
                     }
                   }}
-                  placeholder="Type a message"
+                  placeholder={pendingUploads.length ? 'Add a caption' : 'Type a message'}
                 />
               </div>
 
@@ -1786,6 +2267,16 @@ export default function App() {
         ) : (
           <div className="empty-state">Select a contact to start chatting</div>
         )}
+
+        {isDragOver && selectedUser ? (
+          <div className="chat-drop-overlay">
+            <div className="chat-drop-card">
+              <div className="chat-drop-icon">📎</div>
+              <div className="chat-drop-title">Drop files to attach</div>
+              <div className="chat-drop-subtitle">Add a caption, then press Send</div>
+            </div>
+          </div>
+        ) : null}
       </main>
 
       {deleteChatTarget ? (
@@ -1857,9 +2348,36 @@ export default function App() {
       ) : null}
 
       {incomingFromUserId ? (
-        <div className="incoming-box">
-          <div className="incoming-title">Incoming call</div>
-          <div className="incoming-body">{userName(incomingFromUserId)} is calling...</div>
+        <div className="incoming-box tg-incoming-call">
+          <div className="tg-incoming-call-top">
+            <div
+              className="tg-incoming-avatar"
+              style={{ background: avatarBg(incomingFromUserId) }}
+            >
+              {getInitials(userName(incomingFromUserId))}
+            </div>
+
+            <div
+              className={`tg-incoming-badge ${
+                incomingCallMode === 'audio' ? 'audio' : 'video'
+              }`}
+            >
+              <span className="tg-incoming-badge-icon">
+                {incomingCallMode === 'audio' ? '📞' : '🎥'}
+              </span>
+              <span>
+                {incomingCallMode === 'audio' ? 'Voice call' : 'Video call'}
+              </span>
+            </div>
+          </div>
+
+          <div className="incoming-title">{userName(incomingFromUserId)}</div>
+          <div className="incoming-body">
+            {incomingCallMode === 'audio'
+              ? 'Incoming voice call'
+              : 'Incoming video call'}
+          </div>
+
           <div className="incoming-actions">
             <button className="danger" onClick={declineCall}>
               Decline
@@ -1882,26 +2400,44 @@ export default function App() {
             </div>
 
             <div className="video-grid">
-              <div className="video-card large">
-                <video ref={remoteVideoRef} autoPlay playsInline />
-                {!remoteStreamState ? <div className="video-placeholder">Waiting for remote video…</div> : null}
-                <span className="video-label">Remote</span>
-              </div>
+              {callState.mode === 'video' ? (
+                <>
+                  <div className="video-card large">
+                    <video ref={remoteVideoRef} autoPlay playsInline />
+                    {!remoteStreamState ? <div className="video-placeholder">Waiting for remote video…</div> : null}
+                    <span className="video-label">Remote</span>
+                  </div>
 
-              <div className="video-card smallcard">
-                <video ref={localVideoRef} autoPlay playsInline muted />
-                {!localStreamState ? <div className="video-placeholder">Starting camera…</div> : null}
-                <span className="video-label">You</span>
-              </div>
+                  <div className="video-card smallcard">
+                    <video ref={localVideoRef} autoPlay playsInline muted />
+                    {!localStreamState ? <div className="video-placeholder">Starting camera…</div> : null}
+                    <span className="video-label">You</span>
+                  </div>
+                </>
+               ) : (
+                <div className="video-card large">
+                  <audio ref={remoteAudioRef} autoPlay playsInline />
+                  <div className="video-placeholder">
+                    {callState.phase === 'connected'
+                      ? `Voice call with ${userName(callState.peerUserId)}`
+                      : `Connecting voice call with ${userName(callState.peerUserId)}...`}
+                  </div>
+                  <span className="video-label">Voice call</span>
+                </div>
+              )}
             </div>
 
             <div className="call-actions">
               <button className="icon-btn wide" onClick={toggleMute}>
                 {callState.muted ? 'Unmute' : 'Mute'}
               </button>
-              <button className="icon-btn wide" onClick={toggleCamera}>
-                {callState.cameraOff ? 'Camera On' : 'Camera Off'}
-              </button>
+
+              {callState.mode === 'video' ? (
+                <button className="icon-btn wide" onClick={toggleCamera}>
+                  {callState.cameraOff ? 'Camera On' : 'Camera Off'}
+                </button>
+              ) : null}
+
               <button className="danger wide" onClick={() => cleanupCall(true)}>
                 End call
               </button>
