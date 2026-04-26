@@ -19,17 +19,36 @@ function createLanServer({ port = 4000, userDataPath }) {
   const CALL_TIMEOUT_MS = 30_000;
   const activeCalls = new Map(); // conversationKey -> { fromUserId, toUserId, timeoutId }
 
+  function normalizeDbShape(raw) {
+    return {
+      users: Array.isArray(raw?.users) ? raw.users : [],
+      messages: Array.isArray(raw?.messages) ? raw.messages : [],
+      conversationStates: Array.isArray(raw?.conversationStates) ? raw.conversationStates : [],
+      messageStates: Array.isArray(raw?.messageStates) ? raw.messageStates : []
+    };
+  }
+
   function loadDb() {
     if (!fs.existsSync(dbFile)) {
-      const initial = { users: [], messages: [] };
+      const initial = {
+        users: [],
+        messages: [],
+        conversationStates: [],
+        messageStates: []
+      };
       fs.writeFileSync(dbFile, JSON.stringify(initial, null, 2));
       return initial;
     }
 
     try {
-      return JSON.parse(fs.readFileSync(dbFile, 'utf8'));
+      return normalizeDbShape(JSON.parse(fs.readFileSync(dbFile, 'utf8')));
     } catch {
-      return { users: [], messages: [] };
+      return {
+        users: [],
+        messages: [],
+        conversationStates: [],
+        messageStates: []
+      };
     }
   }
 
@@ -71,13 +90,133 @@ function createLanServer({ port = 4000, userDataPath }) {
     return [a, b].sort().join('__');
   }
 
-  function getMessages(userA, userB) {
-    const key = conversationKey(userA, userB);
-    return db.messages.filter((m) => m.conversationKey === key).sort((a, b) => a.createdAt - b.createdAt);
-  }
-
   function findMessageById(messageId) {
     return db.messages.find((m) => m.id === messageId) || null;
+  }
+
+  function getConversationState(userId, peerUserId) {
+    const key = conversationKey(userId, peerUserId);
+    return (
+      db.conversationStates.find(
+        (item) => item.userId === userId && item.conversationKey === key
+      ) || null
+    );
+  }
+
+  function ensureConversationState(userId, peerUserId) {
+    const existing = getConversationState(userId, peerUserId);
+    if (existing) return existing;
+
+    const state = {
+      id: `cs_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId,
+      peerUserId,
+      conversationKey: conversationKey(userId, peerUserId),
+      clearedAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    db.conversationStates.push(state);
+    return state;
+  }
+
+  function getConversationClearedAt(userId, peerUserId) {
+    const state = getConversationState(userId, peerUserId);
+    return state?.clearedAt || 0;
+  }
+
+  function getMessageState(userId, messageId) {
+    return (
+      db.messageStates.find(
+        (item) => item.userId === userId && item.messageId === messageId
+      ) || null
+    );
+  }
+  
+  function ensureMessageState(userId, messageId) {
+    const existing = getMessageState(userId, messageId);
+    if (existing) return existing;
+  
+    const state = {
+      id: `ms_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      userId,
+      messageId,
+      hiddenAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  
+    db.messageStates.push(state);
+    return state;
+  }
+  
+  function isMessageHiddenForUser(userId, messageId) {
+    const state = getMessageState(userId, messageId);
+    return !!state?.hiddenAt;
+  }
+  
+  function clearMessageForUser({ userId, messageId }) {
+    const message = findMessageById(messageId);
+    if (!message) return { ok: false, error: 'Message not found' };
+  
+    if (message.fromUserId !== userId && message.toUserId !== userId) {
+      return { ok: false, error: 'You are not allowed to delete this message for yourself' };
+    }
+  
+    const now = Date.now();
+    const state = ensureMessageState(userId, messageId);
+  
+    state.hiddenAt = now;
+    state.updatedAt = now;
+  
+    saveDb();
+  
+    return {
+      ok: true,
+      userId,
+      messageId,
+      conversationKey: message.conversationKey,
+      hiddenAt: now
+    };
+  }
+
+  function clearConversationForUser({ userId, peerUserId }) {
+    const me = getUserById(userId);
+    const peer = getUserById(peerUserId);
+
+    if (!me || !peer) {
+      return { ok: false, error: 'Conversation users not found' };
+    }
+
+    const now = Date.now();
+    const state = ensureConversationState(userId, peerUserId);
+
+    state.peerUserId = peerUserId;
+    state.clearedAt = now;
+    state.updatedAt = now;
+
+    saveDb();
+
+    return {
+      ok: true,
+      userId,
+      peerUserId,
+      conversationKey: conversationKey(userId, peerUserId),
+      clearedAt: now
+    };
+  }
+
+  function getMessages(userA, userB, viewerUserId = userA) {
+    const key = conversationKey(userA, userB);
+    const peerUserId = viewerUserId === userA ? userB : userA;
+    const clearedAt = getConversationClearedAt(viewerUserId, peerUserId);
+  
+    return db.messages
+      .filter((m) => m.conversationKey === key)
+      .filter((m) => m.createdAt > clearedAt)
+      .filter((m) => !isMessageHiddenForUser(viewerUserId, m.id))
+      .sort((a, b) => a.createdAt - b.createdAt);
   }
 
   function serializeMessage(message) {
@@ -207,6 +346,34 @@ function createLanServer({ port = 4000, userDataPath }) {
     return buildReplyToSnapshot(original);
   }
 
+  function deleteConversation({ userId, peerUserId }) {
+    const me = getUserById(userId);
+    const peer = getUserById(peerUserId);
+  
+    if (!me || !peer) {
+      return { ok: false, error: 'Conversation users not found' };
+    }
+  
+    const key = conversationKey(userId, peerUserId);
+    const deletedMessages = db.messages.filter((m) => m.conversationKey === key);
+    const deletedMessageIds = new Set(deletedMessages.map((m) => m.id));
+  
+    db.messages = db.messages.filter((m) => m.conversationKey !== key);
+    db.conversationStates = db.conversationStates.filter((s) => s.conversationKey !== key);
+    db.messageStates = db.messageStates.filter((s) => !deletedMessageIds.has(s.messageId));
+    saveDb();
+  
+    clearActiveCall(key);
+  
+    return {
+      ok: true,
+      conversationKey: key,
+      deletedCount: deletedMessages.length,
+      byUserId: userId,
+      peerUserId
+    };
+  }
+
   const upload = multer({
     storage: multer.diskStorage({
       destination: (_req, _file, cb) => cb(null, uploadsDir),
@@ -218,14 +385,25 @@ function createLanServer({ port = 4000, userDataPath }) {
     limits: { fileSize: 50 * 1024 * 1024 }
   });
 
-  const onlineSockets = new Map(); // userId -> socket.id
+  const onlineSockets = new Map();
+  const idleUserIds = new Set();
+
+  function getPresencePayload() {
+    const onlineUserIds = [...onlineSockets.keys()];
+    const onlineUserIdSet = new Set(onlineUserIds);
+
+    return {
+      onlineUserIds,
+      idleUserIds: [...idleUserIds].filter((userId) => onlineUserIdSet.has(userId))
+    };
+  }
 
   function emitUsersChanged() {
     io.emit('users:changed');
   }
 
   function emitPresence() {
-    io.emit('presence:update', [...onlineSockets.keys()]);
+    io.emit('presence:update', getPresencePayload());
   }
 
   function emitMessageToParticipants(message) {
@@ -249,6 +427,34 @@ function createLanServer({ port = 4000, userDataPath }) {
 
     if (senderSocketId) io.to(senderSocketId).emit('message:status', payload);
     if (recipientSocketId) io.to(recipientSocketId).emit('message:status', payload);
+  }
+
+  function emitConversationDeleted({ conversationKey, byUserId, peerUserId }) {
+    const payload = { conversationKey, byUserId, peerUserId };
+
+    const mySocketId = onlineSockets.get(byUserId);
+    const peerSocketId = onlineSockets.get(peerUserId);
+
+    if (mySocketId) io.to(mySocketId).emit('conversation:deleted', payload);
+    if (peerSocketId) io.to(peerSocketId).emit('conversation:deleted', payload);
+  }
+
+  function emitConversationClearedForMe({ conversationKey, userId, peerUserId, clearedAt }) {
+    const payload = { conversationKey, userId, peerUserId, clearedAt };
+    const mySocketId = onlineSockets.get(userId);
+
+    if (mySocketId) {
+      io.to(mySocketId).emit('conversation:cleared-for-me', payload);
+    }
+  }
+
+  function emitMessageClearedForMe({ messageId, conversationKey, userId, hiddenAt }) {
+    const payload = { messageId, conversationKey, userId, hiddenAt };
+    const socketId = onlineSockets.get(userId);
+  
+    if (socketId) {
+      io.to(socketId).emit('message:cleared-for-me', payload);
+    }
   }
 
   function clearActiveCall(key) {
@@ -283,20 +489,30 @@ function createLanServer({ port = 4000, userDataPath }) {
     const user = upsertUser(name);
     emitUsersChanged();
 
-    res.json({ user, users: db.users });
+    res.json({
+      user,
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/users', (_req, res) => {
-    res.json({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+    res.json({
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/roster', (_req, res) => {
-    res.json({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+    res.json({
+      users: db.users,
+      ...getPresencePayload()
+    });
   });
 
   app.get('/api/messages/:me/:peer', (req, res) => {
     const { me, peer } = req.params;
-    res.json({ messages: getMessages(me, peer).map(serializeMessage) });
+    res.json({ messages: getMessages(me, peer, me).map(serializeMessage) });
   });
 
   app.post('/api/upload', upload.single('file'), (req, res) => {
@@ -355,11 +571,81 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       socket.data.userId = userId;
       onlineSockets.set(userId, socket.id);
+      idleUserIds.delete(userId);
       emitPresence();
     });
 
     socket.on('users:sync', (callback) => {
-      callback?.({ users: db.users, onlineUserIds: [...onlineSockets.keys()] });
+      callback?.({
+        users: db.users,
+        ...getPresencePayload()
+      });
+    });
+
+    socket.on('presence:set-state', ({ state }) => {
+      const userId = socket.data.userId;
+      if (!userId) return;
+      if (!onlineSockets.has(userId)) return;
+
+      if (state === 'idle') {
+        idleUserIds.add(userId);
+      } else {
+        idleUserIds.delete(userId);
+      }
+
+      emitPresence();
+    });
+
+    socket.on('conversation:clear-for-me', ({ userId, peerUserId }, callback) => {
+      const joinedUserId = socket.data.userId;
+      if (!joinedUserId || joinedUserId !== userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+
+      const result = clearConversationForUser({ userId, peerUserId });
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+
+      emitConversationClearedForMe(result);
+      callback?.(result);
+    });
+
+    socket.on('conversation:delete', ({ userId, peerUserId }, callback) => {
+      const joinedUserId = socket.data.userId;
+      if (!joinedUserId || joinedUserId !== userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+
+      const result = deleteConversation({ userId, peerUserId });
+
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+
+      emitConversationDeleted(result);
+      callback?.(result);
+    });
+
+    socket.on('message:clear-for-me', ({ userId, messageId }, callback) => {
+      const joinedUserId = socket.data.userId;
+      if (!joinedUserId || joinedUserId !== userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+    
+      const result = clearMessageForUser({ userId, messageId });
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      emitMessageClearedForMe(result);
+      callback?.(result);
     });
 
     socket.on('message:send', ({ fromUserId, toUserId, text, replyToMessageId }, callback) => {
@@ -537,6 +823,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       if (onlineSockets.get(userId) === socket.id) {
         onlineSockets.delete(userId);
+        idleUserIds.delete(userId);
         emitUsersChanged();
         emitPresence();
       }

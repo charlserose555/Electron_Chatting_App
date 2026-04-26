@@ -639,18 +639,32 @@ button {
 .composer {
   display: flex;
   gap: 14px;
-  align-items: center;
+  align-items: flex-end;
   padding: 16px;
   border-top: 1px solid var(--line);
 }
 
-.composer input {
-  flex: 1;
+.composer-input {
+  width: 100%;
+  min-height: 52px;
+  max-height: 140px;
+  resize: none;
+  overflow-y: auto;
   border: 1px solid var(--line);
   background: transparent;
   color: var(--text);
-  border-radius: 999px;
-  padding: 16px 18px;
+  border-radius: 22px;
+  padding: 14px 18px;
+  line-height: 1.42;
+  outline: none;
+  font: inherit;
+  font-family: inherit;
+  scrollbar-width: none;
+}
+
+.composer-input::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .emoji-btn {
@@ -879,6 +893,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  align-self: stretch;
 }
 
 .reply-draft {
@@ -1004,4 +1019,29 @@ button {
   stroke-width: 1.7;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.scroll-bottom-btn {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  z-index: 10;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 50%;
+  background: rgba(10, 27, 51, 0.96);
+  color: #e8f1ff;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.scroll-bottom-btn:hover {
+  background: rgba(18, 39, 73, 0.98);
+}
+
+.online-dot.idle {
+  background: #fbbf24;
 }

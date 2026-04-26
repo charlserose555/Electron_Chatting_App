@@ -244,6 +244,7 @@ export default function App() {
   const [me, setMe] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
+  const [idleUserIds, setIdleUserIds] = useState<string[]>([]); 
   const [selectedUserId, setSelectedUserId] = useState('');
   const [search, setSearch] = useState('');
   const [messagesByConv, setMessagesByConv] = useState<Record<string, Message[]>>({});
@@ -270,7 +271,7 @@ export default function App() {
   const messagesRef = useRef<HTMLElement | null>(null);
   const autoScrollRef = useRef(true);
   const incomingFromUserIdRef = useRef<string | null>(null);
-  const composerInputRef = useRef<HTMLInputElement | null>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const composerRef = useRef<HTMLElement | null>(null);
   const [isWindowActive, setIsWindowActive] = useState(
     () => document.visibilityState === 'visible' && document.hasFocus()
@@ -278,6 +279,10 @@ export default function App() {
   
   const isWindowActiveRef = useRef(isWindowActive);
   const activeMessagesRef = useRef<Message[]>([]);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [deleteChatTargetUserId, setDeleteChatTargetUserId] = useState<string | null>(null);
+  const deleteChatTarget = users.find((u) => u.id === deleteChatTargetUserId) || null;
+  const [deleteMessageTargetId, setDeleteMessageTargetId] = useState<string | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -344,7 +349,7 @@ export default function App() {
       if (me && connectedServerUrl) {
         void loadHistory(userId, true);
       } else {
-        smoothScrollToBottom(true, true);
+        smoothScrollToBottom(true, false);
       }
     });
 
@@ -396,6 +401,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!socketRef.current || !me) return;
+  
+    socketRef.current.emit('presence:set-state', {
+      state: isWindowActive ? 'online' : 'idle'
+    });
+  }, [isWindowActive, me]);
+
+  useEffect(() => {
+    if (!socketRef.current || !me) return;
+  
+    socketRef.current.emit('presence:set-state', {
+      state: callState ? 'online' : isWindowActive ? 'online' : 'idle'
+    });
+  }, [isWindowActive, me, callState]);
+
+  useEffect(() => {
+    resizeComposerTextarea();
+  }, [draft, replyingTo]);
+
+  useEffect(() => {
     const el = composerRef.current;
     if (!el) return;
   
@@ -415,6 +440,8 @@ export default function App() {
 
   useEffect(() => {
     setReplyingTo(null);
+    setDeleteChatTargetUserId(null);
+    setDeleteMessageTargetId(null);
   }, [selectedUserId]);
 
   async function handleConnect() {
@@ -463,12 +490,16 @@ export default function App() {
 
     socket.on('connect', () => {
       socket.emit('auth:join', { userId: loginData.user.id });
-      socket.emit('users:sync', (payload: { users: User[]; onlineUserIds: string[] }) => {
-        setUsers(payload.users);
-        setOnlineUserIds(payload.onlineUserIds);
-        const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
-        setSelectedUserId((curr) => curr || fallback);
-      });
+      socket.emit(
+        'users:sync',
+        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+          setUsers(payload.users);
+          setOnlineUserIds(payload.onlineUserIds || []);
+          setIdleUserIds(payload.idleUserIds || []);
+          const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
+          setSelectedUserId((curr) => curr || fallback);
+        }
+      );
     });
 
     socket.on(
@@ -494,14 +525,55 @@ export default function App() {
       }
     );
 
+    socket.on(
+      'conversation:cleared-for-me',
+      ({
+        conversationKey: clearedConversationKey
+      }: {
+        conversationKey: string;
+        userId: string;
+        peerUserId: string;
+        clearedAt: number;
+      }) => {
+        clearConversationLocally(clearedConversationKey);
+        setDeleteChatTargetUserId(null);
+      }
+    );
+
+    socket.on(
+      'message:cleared-for-me',
+      ({
+        messageId,
+        conversationKey: clearedConversationKey
+      }: {
+        messageId: string;
+        conversationKey: string;
+        userId: string;
+        hiddenAt: number;
+      }) => {
+        clearMessageLocally(messageId, clearedConversationKey);
+        setDeleteMessageTargetId(null);
+      }
+    );
+
     socket.on('users:changed', () => {
-      socket.emit('users:sync', (payload: { users: User[]; onlineUserIds: string[] }) => {
-        setUsers(payload.users);
-        setOnlineUserIds(payload.onlineUserIds);
-      });
+      socket.emit(
+        'users:sync',
+        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+          setUsers(payload.users);
+          setOnlineUserIds(payload.onlineUserIds || []);
+          setIdleUserIds(payload.idleUserIds || []);
+        }
+      );
     });
 
-    socket.on('presence:update', (ids: string[]) => setOnlineUserIds(ids));
+    socket.on(
+      'presence:update',
+      (payload: { onlineUserIds: string[]; idleUserIds: string[] }) => {
+        setOnlineUserIds(payload.onlineUserIds || []);
+        setIdleUserIds(payload.idleUserIds || []);
+      }
+    );
 
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -568,6 +640,20 @@ export default function App() {
         kind: 'call'
       });
     });
+
+    socket.on(
+      'conversation:deleted',
+      ({
+        conversationKey: deletedConversationKey
+      }: {
+        conversationKey: string;
+        byUserId: string;
+        peerUserId: string;
+      }) => {
+        clearConversationLocally(deletedConversationKey);
+        setDeleteChatTargetUserId(null);
+      }
+    );
 
     socket.on('call:accepted', async ({ fromUserId }: { fromUserId: string }) => {
       if (currentCallRef.current?.peerUserId !== fromUserId) return;
@@ -765,61 +851,72 @@ export default function App() {
 
     if (forceScroll) {
       autoScrollRef.current = true;
-      smoothScrollToBottom(true, true);
+      smoothScrollToBottom(true, false);
     }
   }
 
   function sendMessage() {
     if (!socketRef.current || !me || !selectedUserId || !draft.trim()) return;
-
+  
     const text = draft.trim();
     setDraft('');
     stopTyping();
     autoScrollRef.current = true;
-
+  
     socketRef.current.emit('message:send', {
       fromUserId: me.id,
       toUserId: selectedUserId,
       text,
       replyToMessageId: replyingTo?.id || null
     });
-
+  
     setReplyingTo(null);
-    smoothScrollToBottom(true, true);
+  
+    requestAnimationFrame(() => {
+      resizeComposerTextarea(true);
+      focusComposer(false);
+    });
+  
+    smoothScrollToBottom(true, false);
   }
 
   async function sendAttachment() {
     if (!me || !selectedUserId || !connectedServerUrl) return;
-
+  
     const files = await desktopApi.onOpenFileDialog();
     if (!files?.length) return;
-
+  
     const filePath = files[0];
     const parts = filePath.split(/[/\\]/);
     const fileName = parts[parts.length - 1];
     const blob = await fetch(pathToFileUrl(filePath)).then((r) => r.blob()).catch(() => null);
-
+  
     if (!blob) {
       alert('Unable to read the selected file');
       return;
     }
-
+  
     const form = new FormData();
     form.append('file', blob, fileName);
     form.append('fromUserId', me.id);
     form.append('toUserId', selectedUserId);
     form.append('text', draft.trim());
-
+  
     if (replyingTo?.id) {
       form.append('replyToMessageId', replyingTo.id);
     }
-
+  
     setDraft('');
     setReplyingTo(null);
-
+  
+    requestAnimationFrame(() => {
+      resizeComposerTextarea(true);
+      focusComposer(false);
+    });
+  
     const res = await fetch(`${connectedServerUrl}/api/upload`, { method: 'POST', body: form });
     const data = await res.json();
-
+  
     if (!res.ok) {
       alert(data.error || 'Upload failed');
       return;
@@ -831,14 +928,44 @@ export default function App() {
     return normalized.startsWith('file://') ? normalized : `file:///${normalized}`;
   }
 
-  function deleteMessage(messageId: string) {
-    if (!socketRef.current || !me) return;
-
+  function openDeleteMessageDialog(messageId: string) {
+    setDeleteMessageTargetId(messageId);
+    setContextMenu(null);
+  }
+  
+  function clearMessageForMe() {
+    if (!socketRef.current || !me || !deleteMessageTarget) return;
+  
+    socketRef.current.emit(
+      'message:clear-for-me',
+      {
+        userId: me.id,
+        messageId: deleteMessageTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete message for you');
+        }
+      }
+    );
+  }
+  
+  function deleteMessageForEveryone() {
+    if (!socketRef.current || !me || !deleteMessageTarget) return;
+  
     socketRef.current.emit(
       'message:delete',
-      { messageId, byUserId: me.id },
+      {
+        messageId: deleteMessageTarget.id,
+        byUserId: me.id
+      },
       (result: { ok: boolean; error?: string; message?: Message }) => {
-        if (!result.ok) alert(result.error || 'Delete failed');
+        if (!result?.ok) {
+          alert(result?.error || 'Delete failed');
+          return;
+        }
+  
+        setDeleteMessageTargetId(null);
       }
     );
   }
@@ -959,6 +1086,81 @@ export default function App() {
       });
   }
 
+  function resizeComposerTextarea(resetToOneRow = false) {
+    const el = composerInputRef.current;
+    if (!el) return;
+  
+    if (resetToOneRow) {
+      el.style.height = 'auto';
+      return;
+    }
+  
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
+  }
+
+  function focusComposer(moveCaretToEnd = true) {
+    requestAnimationFrame(() => {
+      const el = composerInputRef.current;
+      if (!el) return;
+  
+      el.focus();
+  
+      if (moveCaretToEnd) {
+        const length = el.value.length;
+        el.setSelectionRange(length, length);
+      }
+    });
+  }
+
+  function getPresence(userId: string): 'online' | 'idle' | 'offline' {
+    if (idleUserIds.includes(userId)) return 'idle';
+    if (onlineUserIds.includes(userId)) return 'online';
+    return 'offline';
+  }
+
+  function clearConversationLocally(conversationKeyValue: string) {
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      delete next[conversationKeyValue];
+      return next;
+    });
+  
+    const activeKey =
+      me && selectedUserIdRef.current ? conversationKey(me.id, selectedUserIdRef.current) : '';
+  
+    if (conversationKeyValue === activeKey) {
+      setReplyingTo(null);
+      setContextMenu(null);
+  
+      requestAnimationFrame(() => {
+        resizeComposerTextarea(true);
+        focusComposer(false);
+        syncMessageViewportState();
+      });
+    }
+  }
+
+  function clearMessageLocally(messageId: string, conversationKeyValue: string) {
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      next[conversationKeyValue] = (next[conversationKeyValue] || []).filter((m) => m.id !== messageId);
+      return next;
+    });
+  
+    if (replyingTo?.id === messageId) {
+      setReplyingTo(null);
+    }
+  
+    if (contextMenu?.messageId === messageId) {
+      setContextMenu(null);
+    }
+  
+    requestAnimationFrame(() => {
+      syncMessageViewportState();
+    });
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -1013,22 +1215,65 @@ export default function App() {
   function smoothScrollToBottom(force = false, smooth = true) {
     requestAnimationFrame(() => {
       scrollToBottom(force, smooth);
-      updateMessageScrollbar();
+  
+      requestAnimationFrame(() => {
+        syncMessageViewportState();
+      });
     });
   }
 
   function handleMessagesScroll() {
-    const el = messagesRef.current;
-    if (!el) return;
-  
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    autoScrollRef.current = distanceFromBottom < 80;
-  
-    updateMessageScrollbar();
+    syncMessageViewportState();
   
     if (selectedUserIdRef.current && autoScrollRef.current) {
       markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
     }
+  }
+
+  function syncMessageViewportState() {
+    const el = messagesRef.current;
+    if (!el) return;
+  
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isAwayFromBottom = distanceFromBottom >= 80;
+  
+    autoScrollRef.current = !isAwayFromBottom;
+    setShowScrollToBottom(isAwayFromBottom);
+    updateMessageScrollbar();
+  }
+
+  function clearCurrentConversationForMe() {
+    if (!socketRef.current || !me || !deleteChatTarget) return;
+  
+    socketRef.current.emit(
+      'conversation:clear-for-me',
+      {
+        userId: me.id,
+        peerUserId: deleteChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete chat for you');
+        }
+      }
+    );
+  }
+  
+  function deleteCurrentConversationForEveryone() {
+    if (!socketRef.current || !me || !deleteChatTarget) return;
+  
+    socketRef.current.emit(
+      'conversation:delete',
+      {
+        userId: me.id,
+        peerUserId: deleteChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete chat for everyone');
+        }
+      }
+    );
   }
 
   function deletedMessageLabel(message: Message, meId: string) {
@@ -1071,10 +1316,8 @@ export default function App() {
     setContextMenu(null);
     autoScrollRef.current = true;
   
-    requestAnimationFrame(() => {
-      composerInputRef.current?.focus();
-      smoothScrollToBottom(true, false);
-    });
+    focusComposer();
+    smoothScrollToBottom(true, false);
   }
 
   function scrollToMessage(messageId: string) {
@@ -1110,9 +1353,14 @@ export default function App() {
     return messagesByConv[conversationKey(me.id, selectedUserId)] || [];
   }, [messagesByConv, me, selectedUserId]);
 
+  const deleteMessageTarget = useMemo(() => {
+    if (!deleteMessageTargetId) return null;
+    return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
+  }, [deleteMessageTargetId, activeMessages]);
+
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
-  }, [activeMessages]);
+  }, [activeMessages]);  
 
   const contextTargetMessage = useMemo(() => {
     if (!contextMenu) return null;
@@ -1125,16 +1373,32 @@ export default function App() {
   }, [selectedUserId, me, connectedServerUrl]);
 
   useEffect(() => {
+    if (!replyingTo) return;
+    focusComposer();
+  }, [replyingTo]);
+
+  useEffect(() => {
+    if (!selectedUserId) return;
+    focusComposer();
+  }, [selectedUserId]);
+
+  useEffect(() => {
     if (!selectedUserId) return;
     markUnreadMessagesAsRead(selectedUserId, activeMessages);
   }, [activeMessages, selectedUserId, isWindowActive]);
 
+  // useEffect(() => {
+  //   requestAnimationFrame(() => {
+  //     syncMessageViewportState();
+  //   });
+  // }, [activeMessages]);
+
   useEffect(() => {
-    smoothScrollToBottom(false, false);
+    smoothScrollToBottom(true, false);
   }, [activeMessages]);
 
   useEffect(() => {
-    smoothScrollToBottom(false, false);
+    smoothScrollToBottom(true, false);
   }, [selectedUserId]);
 
   useEffect(() => {
@@ -1239,6 +1503,7 @@ export default function App() {
             const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
             const last = conv[conv.length - 1];
             const online = onlineUserIds.includes(user.id);
+            const presence = getPresence(user.id);
 
             return (
               <button
@@ -1250,7 +1515,9 @@ export default function App() {
                   <div className="avatar" style={{ background: avatarBg(user.id) }}>
                     {getInitials(user.name)}
                   </div>
-                  {online ? <span className="online-dot" /> : null}
+                  {presence !== 'offline' ? (
+                    <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
+                  ) : null}
                 </div>
 
                 <div className="contact-text">
@@ -1275,11 +1542,19 @@ export default function App() {
                   <div className="avatar" style={{ background: avatarBg(selectedUser.id) }}>
                     {getInitials(selectedUser.name)}
                   </div>
-                  {onlineUserIds.includes(selectedUser.id) ? <span className="online-dot" /> : null}
+                  {getPresence(selectedUser.id) !== 'offline' ? (
+                    <span className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''}`} />
+                  ) : null}
                 </div>
                 <div>
                   <div className="name">{selectedUser.name}</div>
-                  <div className="sub">{onlineUserIds.includes(selectedUser.id) ? 'Active now' : 'Offline'}</div>
+                  <div className="sub">
+                    {getPresence(selectedUser.id) === 'online'
+                      ? 'Online'
+                      : getPresence(selectedUser.id) === 'idle'
+                      ? 'Idle'
+                      : 'Offline'}
+                  </div>
                 </div>
               </div>
 
@@ -1289,6 +1564,13 @@ export default function App() {
                 </button>
                 <button className="icon-btn" onClick={startCall}>
                   🎥
+                </button>
+                <button
+                  className="icon-btn"
+                  onClick={() => setDeleteChatTargetUserId(selectedUser.id)}
+                  title="Delete chat"
+                >
+                  🗑
                 </button>
               </div>
             </header>
@@ -1398,6 +1680,24 @@ export default function App() {
                   }}
                 />
               </div>
+
+              {showScrollToBottom ? (
+                <button
+                  className="scroll-bottom-btn"
+                  onClick={() => {
+                    autoScrollRef.current = true;
+                    smoothScrollToBottom(true, true);
+
+                    if (selectedUserIdRef.current) {
+                      markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
+                    }
+                  }}
+                  aria-label="Scroll to bottom"
+                  title="Scroll to bottom"
+                >
+                  ↓
+                </button>
+              ) : null}
             </div>
 
             <footer className="composer" ref={composerRef}>
@@ -1427,17 +1727,19 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
-
-                <input
+                <textarea
                   ref={composerInputRef}
+                  className="composer-input"
                   value={draft}
+                  rows={1}
                   onChange={(e) => {
                     setDraft(e.target.value);
                     startTyping();
+                    resizeComposerTextarea();
                   }}
                   onBlur={stopTyping}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
+                    if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       sendMessage();
                     }
@@ -1463,6 +1765,74 @@ export default function App() {
           <div className="empty-state">Select a contact to start chatting</div>
         )}
       </main>
+
+      {deleteChatTarget ? (
+        <div className="call-overlay">
+          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
+            <div className="call-top">
+              <div>
+                <div className="call-name">Delete chat</div>
+                <div className="call-sub">Choose how to delete chat with {deleteChatTarget.name}</div>
+              </div>
+            </div>
+
+            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+              Delete for me hides the current chat only on your app.
+              <br />
+              Delete for everyone removes the chat history for both users.
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
+                Cancel
+              </button>
+              <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
+                Delete for me
+              </button>
+              <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
+                Delete for everyone
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteMessageTarget ? (
+        <div className="call-overlay">
+          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
+            <div className="call-top">
+              <div>
+                <div className="call-name">Delete message</div>
+                <div className="call-sub">
+                  Choose how to delete this message
+                </div>
+              </div>
+            </div>
+
+            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+              Delete for me hides this message only on your app.
+              <br />
+              {deleteMessageTarget.fromUserId === me.id
+                ? 'Delete for everyone replaces the message for both users.'
+                : 'You can delete this message for yourself.'}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
+                Cancel
+              </button>
+              <button className="icon-btn wide" onClick={clearMessageForMe}>
+                Delete for me
+              </button>
+              {deleteMessageTarget.fromUserId === me.id ? (
+                <button className="danger wide" onClick={deleteMessageForEveryone}>
+                  Delete for everyone
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {incomingFromUserId ? (
         <div className="incoming-box">
@@ -1528,17 +1898,12 @@ export default function App() {
             Reply
           </button>
 
-          {contextTargetMessage?.fromUserId === me.id ? (
-            <button
-              className="context-menu-item danger"
-              onClick={() => {
-                deleteMessage(contextMenu.messageId);
-                setContextMenu(null);
-              }}
-            >
-              Delete message
-            </button>
-          ) : null}
+          <button
+            className="context-menu-item danger"
+            onClick={() => openDeleteMessageDialog(contextMenu.messageId)}
+          >
+            Delete message
+          </button>
         </div>
       ) : null}
     </div>
