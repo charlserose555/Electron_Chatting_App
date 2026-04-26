@@ -398,6 +398,65 @@ button {
   border-bottom-right-radius: 8px;
 }
 
+.bubble.telegram-inline-meta {
+  position: relative;
+}
+
+.message-text.with-inline-meta {
+  position: relative;
+  display: block;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-height: 1.42;
+}
+
+.message-text-content {
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.message-inline-meta-spacer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.message-inline-meta {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.message-inline-meta .bubble-time {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.message-inline-meta .tg-status {
+  margin-left: 1px;
+  transform: translateY(0.5px);
+}
+
+.message-inline-meta.mine .bubble-time {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.message-inline-meta:not(.mine) .bubble-time {
+  color: rgba(232, 241, 255, 0.72);
+}
+
 .message-row:not(.mine) .bubble {
   border-bottom-left-radius: 8px;
 }

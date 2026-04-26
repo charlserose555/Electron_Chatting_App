@@ -1588,6 +1588,8 @@ export default function App() {
                   const nextIsSameSenderGroup = isRenderableMessage(next) && next!.fromUserId === m.fromUserId;
                   const showAvatarForThisMessage = !nextIsSameSenderGroup;
 
+                  const useTelegramInlineMeta = !!m.text && !m.attachment;
+
                   return (
                     <div key={m.id} data-message-id={m.id}>
                       {showDivider ? <div className="divider">{dateDivider(m.createdAt)}</div> : null}
@@ -1624,7 +1626,7 @@ export default function App() {
                           ) : null}
 
                           <div className="message-stack">
-                            <div className={`bubble ${mine ? 'mine' : ''}`}>
+                            <div className={`bubble ${mine ? 'mine' : ''} ${useTelegramInlineMeta ? 'telegram-inline-meta' : ''}`}>
                               {m.replyTo ? (
                                 <button
                                   type="button"
@@ -1638,16 +1640,36 @@ export default function App() {
                                 </button>
                               ) : null}
 
-                              {m.text ? <div className="message-text">{m.text}</div> : null}
+                              {m.text ? (
+                                useTelegramInlineMeta ? (
+                                  <div className="message-text with-inline-meta">
+                                    <span className="message-text-content">{m.text}</span>
+
+                                    <span className="message-inline-meta-spacer" aria-hidden="true">
+                                      <span className="bubble-time">{timeLabel(m.createdAt)}</span>
+                                      {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                    </span>
+
+                                    <span className={`message-inline-meta ${mine ? 'mine' : ''}`}>
+                                      <span className="bubble-time">{timeLabel(m.createdAt)}</span>
+                                      {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div className="message-text">{m.text}</div>
+                                )
+                              ) : null}
 
                               {m.attachment ? (
                                 <AttachmentPreview attachment={m.attachment} serverUrl={connectedServerUrl} />
                               ) : null}
 
-                              <div className={`bubble-meta ${mine ? 'mine' : ''}`}>
-                                <span className="bubble-time">{timeLabel(m.createdAt)}</span>
-                                {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
-                              </div>
+                              {!useTelegramInlineMeta ? (
+                                <div className={`bubble-meta ${mine ? 'mine' : ''}`}>
+                                  <span className="bubble-time">{timeLabel(m.createdAt)}</span>
+                                  {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                </div>
+                              ) : null}
                             </div>
                           </div>
 
