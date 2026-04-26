@@ -62,6 +62,13 @@ type PendingUpload = {
   previewUrl: string | null;
 };
 
+type LightboxState =
+  | {
+      items: Attachment[];
+      index: number;
+    }
+  | null;
+
 type CallState =
   | {
       peerUserId: string;
@@ -257,73 +264,321 @@ function isRenderableMessage(msg?: Message) {
   return !!msg && !['call', 'deleted', 'system'].includes(msg.type);
 }
 
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function downloadAttachment(attachment: Attachment, serverUrl: string) {
+  const href = `${serverUrl}${attachment.url}`;
+
+  try {
+    const res = await fetch(href);
+    if (!res.ok) throw new Error('Download failed');
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = attachment.filename || 'download';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    window.setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+    }, 1000);
+  } catch {
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = attachment.filename || 'download';
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+}
+
 function AttachmentPreview({
   attachment,
-  serverUrl
+  serverUrl,
+  onOpenImage
 }: {
   attachment: Attachment;
   serverUrl: string;
+  onOpenImage: () => void;
 }) {
   const href = `${serverUrl}${attachment.url}`;
 
   if (attachment.isImage) {
     return (
-      <img
-        className="image-attachment"
-        src={href}
-        alt={attachment.filename}
-        onLoad={() => {
-          requestAnimationFrame(() => {
-            const el = document.querySelector('.messages') as HTMLElement | null;
-            if (el) {
-              el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-            }
-          });
-        }}
-      />
+      <div className="image-attachment-wrap">
+        <button
+          type="button"
+          className="media-reset-btn image-attachment-link"
+          onClick={onOpenImage}
+        >
+          <img
+            className="image-attachment"
+            src={href}
+            alt={attachment.filename}
+            onLoad={() => {
+              requestAnimationFrame(() => {
+                const el = document.querySelector('.messages') as HTMLElement | null;
+                if (el) {
+                  el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+                }
+              });
+            }}
+          />
+        </button>
+
+        <button
+          type="button"
+          className="attachment-download-btn"
+          title="Download"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void downloadAttachment(attachment, serverUrl);
+          }}
+        >
+          ⬇
+        </button>
+      </div>
     );
   }
 
   return (
-    <a className="file-attachment" href={href} target="_blank" rel="noreferrer">
-      📄 {attachment.filename}
-    </a>
+    <div className="file-attachment-card">
+      <div className="file-attachment-info">
+        <div className="file-attachment-name">📄 {attachment.filename}</div>
+        <div className="file-attachment-sub">
+          {attachment.mimeType || 'File'} · {formatFileSize(attachment.size)}
+        </div>
+      </div>
+
+      <div className="file-attachment-actions">
+        <a
+          className="file-action-btn"
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open
+        </a>
+
+        <button
+          type="button"
+          className="file-action-btn"
+          onClick={() => {
+            void downloadAttachment(attachment, serverUrl);
+          }}
+        >
+          Download
+        </button>
+      </div>
+    </div>
   );
 }
 
 function GalleryPreview({
   attachments,
-  serverUrl
+  serverUrl,
+  onOpenImage
 }: {
   attachments: Attachment[];
   serverUrl: string;
+  onOpenImage: (index: number) => void;
 }) {
-  const visible = attachments.slice(0, 4);
-  const extraCount = attachments.length - visible.length;
+  const visibleCount = attachments.length >= 5 ? 5 : attachments.length;
+  const visible = attachments.slice(0, visibleCount);
+  const extraCount = attachments.length - visibleCount;
+
+  const layoutClass =
+    visible.length >= 5
+      ? 'layout-5plus'
+      : visible.length === 4
+      ? 'layout-4'
+      : visible.length === 3
+      ? 'layout-3'
+      : 'layout-2';
 
   return (
-    <div
-      className={`gallery-attachment grid-${Math.min(visible.length, 4)}`}
-    >
+    <div className={`gallery-attachment ${layoutClass}`}>
       {visible.map((item, index) => {
-        const href = `${serverUrl}${item.url}`;
         const showOverlay = index === visible.length - 1 && extraCount > 0;
 
         return (
-          <a
+          <div
             key={`${item.url}_${index}`}
-            className="gallery-item"
-            href={href}
-            target="_blank"
-            rel="noreferrer"
+            className={`gallery-item item-${index + 1}`}
           >
-            <img src={href} alt={item.filename} className="gallery-item-image" />
-            {showOverlay ? (
-              <div className="gallery-more-overlay">+{extraCount}</div>
-            ) : null}
-          </a>
+            <button
+              type="button"
+              className="media-reset-btn gallery-item-link"
+              onClick={() => onOpenImage(index)}
+            >
+              <img
+                src={`${serverUrl}${item.url}`}
+                alt={item.filename}
+                className="gallery-item-image"
+              />
+
+              {showOverlay ? (
+                <div className="gallery-more-overlay">+{extraCount}</div>
+              ) : null}
+            </button>
+
+            <button
+              type="button"
+              className="gallery-download-btn"
+              title="Download"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void downloadAttachment(item, serverUrl);
+              }}
+            >
+              ⬇
+            </button>
+          </div>
         );
       })}
+    </div>
+  );
+}
+
+function ImageLightbox({
+  state,
+  serverUrl,
+  onClose,
+  onPrev,
+  onNext,
+  onSelect
+}: {
+  state: LightboxState;
+  serverUrl: string;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onSelect: (index: number) => void;
+}) {
+  useEffect(() => {
+    if (!state) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      } else if (event.key === 'ArrowLeft' && state.items.length > 1) {
+        onPrev();
+      } else if (event.key === 'ArrowRight' && state.items.length > 1) {
+        onNext();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [state, onClose, onPrev, onNext]);
+
+  if (!state) return null;
+
+  const current = state.items[state.index];
+  if (!current) return null;
+
+  const hasMultiple = state.items.length > 1;
+
+  return (
+    <div className="lightbox-overlay" onClick={onClose}>
+      <div className="lightbox-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-topbar">
+          <div className="lightbox-meta">
+            <div className="lightbox-filename">{current.filename}</div>
+            <div className="lightbox-counter">
+              {state.index + 1} / {state.items.length}
+            </div>
+          </div>
+
+          <div className="lightbox-actions">
+            <button
+              type="button"
+              className="lightbox-action-btn"
+              onClick={() => void downloadAttachment(current, serverUrl)}
+              title="Download"
+            >
+              ⬇ Download
+            </button>
+            <button
+              type="button"
+              className="lightbox-action-btn"
+              onClick={onClose}
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        <div className="lightbox-stage">
+          {hasMultiple ? (
+            <button
+              type="button"
+              className="lightbox-nav prev"
+              onClick={onPrev}
+              aria-label="Previous image"
+            >
+              ‹
+            </button>
+          ) : null}
+
+          <img
+            src={`${serverUrl}${current.url}`}
+            alt={current.filename}
+            className="lightbox-image"
+          />
+
+          {hasMultiple ? (
+            <button
+              type="button"
+              className="lightbox-nav next"
+              onClick={onNext}
+              aria-label="Next image"
+            >
+              ›
+            </button>
+          ) : null}
+        </div>
+
+        {hasMultiple ? (
+          <div className="lightbox-thumb-row">
+            {state.items.map((item, index) => (
+              <button
+                key={`${item.url}_${index}`}
+                type="button"
+                className={`media-reset-btn lightbox-thumb ${index === state.index ? 'active' : ''}`}
+                onClick={() => onSelect(index)}
+              >
+                <img
+                  src={`${serverUrl}${item.url}`}
+                  alt={item.filename}
+                  className="lightbox-thumb-image"
+                />
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -389,6 +644,7 @@ export default function App() {
   const dragDepthRef = useRef(0);
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const pendingUploadsRef = useRef<PendingUpload[]>([]);
+  const [lightbox, setLightbox] = useState<LightboxState>(null);  
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -593,6 +849,7 @@ export default function App() {
     setIncomingCallMode(null);
     incomingCallModeRef.current = null;
     clearPendingUploads();
+    setLightbox(null);
   }, [selectedUserId]);
 
   async function handleConnect() {
@@ -733,7 +990,7 @@ export default function App() {
         return { ...prev, [key]: next };
       });
 
-      const isNormalNotifyMessage = message.type === 'text' || message.type === 'file';
+      const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
 
       if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
         const senderName = usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
@@ -879,13 +1136,13 @@ export default function App() {
             await peer.setRemoteDescription(new RTCSessionDescription(data.payload));
             const answer = await peer.createAnswer();
             await peer.setLocalDescription(answer);
-
+    
             socket.emit('signal', {
               fromUserId: loginData.user.id,
               toUserId: fromUserId,
               data: { type: 'answer', payload: answer }
             });
-
+    
             const nextCallState: CallState = {
               peerUserId: fromUserId,
               mode: callMode,
@@ -893,15 +1150,15 @@ export default function App() {
               muted: false,
               cameraOff: callMode === 'audio'
             };
-
+    
             currentCallRef.current = nextCallState;
             setCallState(nextCallState);
           }
-
+    
           if (data.type === 'answer' && peerRef.current) {
             await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.payload));
           }
-
+    
           if (data.type === 'candidate' && peerRef.current) {
             await peerRef.current.addIceCandidate(new RTCIceCandidate(data.payload));
           }
@@ -914,13 +1171,13 @@ export default function App() {
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
-
+  
     const socket = socketRef.current;
     if (!socket || !me) throw new Error('Socket not ready');
-
+  
     const peer = new RTCPeerConnection();
     stream.getTracks().forEach((track) => peer.addTrack(track, stream));
-
+  
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('signal', {
@@ -930,22 +1187,22 @@ export default function App() {
         });
       }
     };
-
+  
     peer.ontrack = (event) => {
       setRemoteStreamState(event.streams[0]);
     };
-
+  
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') {
         setCallState((prev) => (prev ? { ...prev, phase: 'connected' } : prev));
         setCallStatus('Connected');
       }
-
+  
       if (['failed', 'closed', 'disconnected'].includes(peer.connectionState)) {
         cleanupCall(false);
       }
     };
-
+  
     peerRef.current = peer;
     return peer;
   }
@@ -1019,12 +1276,10 @@ export default function App() {
   async function ensureLocalStream(mode: CallMode) {
     if (localStreamRef.current) return localStreamRef.current;
   
-    const constraints =
-      mode === 'audio'
-        ? { audio: true }
-        : { audio: true, video: true };
-  
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: mode === 'video'
+    });
   
     localStreamRef.current = stream;
     setLocalStreamState(stream);
@@ -1034,32 +1289,32 @@ export default function App() {
   function cleanupCall(notifyPeer: boolean) {
     const peerUserId =
       currentCallRef.current?.peerUserId || callState?.peerUserId || incomingFromUserIdRef.current;
-
+  
     if (notifyPeer && peerUserId && socketRef.current && me) {
       socketRef.current.emit('call:end', {
         fromUserId: me.id,
         toUserId: peerUserId
       });
     }
-
+  
     peerRef.current?.close();
     peerRef.current = null;
-
+  
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
     }
-
+  
     localStreamRef.current = null;
     currentCallRef.current = null;
     incomingFromUserIdRef.current = null;
-
+  
     setLocalStreamState(null);
     setRemoteStreamState(null);
     setCallState(null);
     setIncomingFromUserId(null);
     setIncomingCallMode(null);
     incomingCallModeRef.current = null;
-
+  
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
@@ -1240,7 +1495,7 @@ export default function App() {
     typingTimerRef.current = null;
   }
 
-  function startCall(mode: CallMode) {
+  async function startCall(mode: CallMode) {
     if (!socketRef.current || !me || !selectedUserId) return;
   
     const nextCallState: CallState = {
@@ -1260,7 +1515,11 @@ export default function App() {
     );
   
     ensureLocalStream(mode).catch(() =>
-      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
+      setCallStatus(
+        mode === 'audio'
+          ? 'Microphone permission denied'
+          : 'Camera/microphone permission denied'
+      )
     );
   
     socketRef.current.emit('call:invite', {
@@ -1270,7 +1529,7 @@ export default function App() {
     });
   }
 
-  function acceptCall() {
+  async function acceptCall() {
     if (!incomingFromUserId || !socketRef.current || !me) return;
   
     const mode = incomingCallModeRef.current || 'video';
@@ -1288,7 +1547,11 @@ export default function App() {
     setCallState(nextCallState);
   
     ensureLocalStream(mode).catch(() =>
-      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
+      setCallStatus(
+        mode === 'audio'
+          ? 'Microphone permission denied'
+          : 'Camera/microphone permission denied'
+      )
     );
   
     socketRef.current.emit('call:accept', {
@@ -1433,6 +1696,48 @@ export default function App() {
   
     requestAnimationFrame(() => {
       syncMessageViewportState();
+    });
+  }
+
+  function openLightbox(items: Attachment[], index = 0) {
+    if (!items.length) return;
+    setLightbox({
+      items,
+      index: Math.max(0, Math.min(index, items.length - 1))
+    });
+  }
+  
+  function closeLightbox() {
+    setLightbox(null);
+  }
+  
+  function showPrevLightbox() {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: (prev.index - 1 + prev.items.length) % prev.items.length
+      };
+    });
+  }
+  
+  function showNextLightbox() {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: (prev.index + 1) % prev.items.length
+      };
+    });
+  }
+  
+  function jumpToLightboxIndex(index: number) {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: Math.max(0, Math.min(index, prev.items.length - 1))
+      };
     });
   }
 
@@ -1791,7 +2096,6 @@ export default function App() {
     if (!deleteMessageTargetId) return null;
     return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
   }, [deleteMessageTargetId, activeMessages]);
-
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
   }, [activeMessages]);  
@@ -1999,11 +2303,16 @@ export default function App() {
               </div>
 
               <div className="header-actions">
-                <button className="icon-btn" onClick={() => startCall('audio')} title="Audio call">
+                <button className="icon-btn" onClick={() => { void startCall('audio'); }} title="Audio call">
                   📞
                 </button>
-                <button className="icon-btn" onClick={() => startCall('video')} title="Video call">
+
+                <button className="icon-btn" onClick={() => { void startCall('video'); }} title="Video call">
                   🎥
+                </button>
+
+                <button className="success" onClick={() => { void acceptCall(); }}>
+                  Accept
                 </button>
                 <button
                   className="icon-btn"
@@ -2083,7 +2392,11 @@ export default function App() {
                               ) : null}
 
                               {isGallery ? (
-                                <GalleryPreview attachments={attachments} serverUrl={connectedServerUrl} />
+                                <GalleryPreview
+                                  attachments={attachments}
+                                  serverUrl={connectedServerUrl}
+                                  onOpenImage={(index) => openLightbox(attachments, index)}
+                                />
                               ) : null}
 
                               {m.text ? (
@@ -2109,7 +2422,15 @@ export default function App() {
                               ) : null}
 
                               {!isGallery && attachments.length === 1 ? (
-                                <AttachmentPreview attachment={attachments[0]} serverUrl={connectedServerUrl} />
+                                <AttachmentPreview
+                                  attachment={attachments[0]}
+                                  serverUrl={connectedServerUrl}
+                                  onOpenImage={() => {
+                                    if (attachments[0].isImage) {
+                                      openLightbox([attachments[0]], 0);
+                                    }
+                                  }}
+                                />
                               ) : null}
 
                               {!useTelegramInlineMeta ? (
@@ -2382,7 +2703,7 @@ export default function App() {
             <button className="danger" onClick={declineCall}>
               Decline
             </button>
-            <button className="success" onClick={acceptCall}>
+            <button className="success" onClick={() => { void acceptCall(); }}>
               Accept
             </button>
           </div>
@@ -2464,6 +2785,15 @@ export default function App() {
           </button>
         </div>
       ) : null}
+
+      <ImageLightbox
+        state={lightbox}
+        serverUrl={connectedServerUrl}
+        onClose={closeLightbox}
+        onPrev={showPrevLightbox}
+        onNext={showNextLightbox}
+        onSelect={jumpToLightboxIndex}
+      />
     </div>
   );
 }

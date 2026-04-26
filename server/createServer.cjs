@@ -329,15 +329,18 @@ function createLanServer({ port = 4000, userDataPath }) {
     const message = findMessageById(messageId);
     if (!message) return { ok: false, error: 'Message not found' };
     if (message.fromUserId !== byUserId) return { ok: false, error: 'Only the sender can delete this message' };
-
+  
     message.text = '';
     message.attachment = null;
+    message.attachments = null;
     message.type = 'deleted';
     message.call = null;
+    message.system = null;
     message.deletedAt = Date.now();
     message.deletedByUserId = byUserId;
+  
     saveDb();
-
+  
     return { ok: true, message };
   }
 
