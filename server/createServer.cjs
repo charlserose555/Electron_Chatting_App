@@ -220,14 +220,21 @@ function createLanServer({ port = 4000, userDataPath }) {
   }
 
   function serializeMessage(message) {
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments
+      : message.attachment
+      ? [message.attachment]
+      : [];
+  
     return {
       id: message.id,
       conversationKey: message.conversationKey,
       fromUserId: message.fromUserId,
       toUserId: message.toUserId,
       text: message.text,
-      attachment: message.attachment || null,
-      type: message.type || (message.attachment ? 'file' : 'text'),
+      attachment: attachments[0] || null,
+      attachments: attachments.length ? attachments : null,
+      type: message.type || (attachments.length > 1 ? 'gallery' : message.attachment ? 'file' : 'text'),
       replyTo: message.replyTo || null,
       system: message.system || null,
       call: message.call || null,
@@ -244,19 +251,35 @@ function createLanServer({ port = 4000, userDataPath }) {
     toUserId,
     text = '',
     attachment = null,
+    attachments = null,
     type = null,
     replyTo = null,
     system = null,
     call = null
   }) {
+    const normalizedAttachments = Array.isArray(attachments) && attachments.length
+      ? attachments
+      : attachment
+      ? [attachment]
+      : [];
+  
+    const messageType =
+      type ||
+      (normalizedAttachments.length > 1
+        ? 'gallery'
+        : normalizedAttachments.length === 1
+        ? 'file'
+        : 'text');
+  
     const message = {
       id: `m_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       conversationKey: conversationKey(fromUserId, toUserId),
       fromUserId,
       toUserId,
       text,
-      attachment,
-      type: type || (attachment ? 'file' : 'text'),
+      attachment: normalizedAttachments[0] || null,
+      attachments: normalizedAttachments.length ? normalizedAttachments : null,
+      type: messageType,
       replyTo,
       system,
       call,
@@ -266,7 +289,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       deliveredAt: null,
       readAt: null
     };
-
+  
     db.messages.push(message);
     saveDb();
     return message;
@@ -287,7 +310,7 @@ function createLanServer({ port = 4000, userDataPath }) {
     });
   }
 
-  function addCallHistory({ fromUserId, toUserId, status }) {
+  function addCallHistory({ fromUserId, toUserId, status, mode = 'video' }) {
     return addMessage({
       fromUserId,
       toUserId,
@@ -296,6 +319,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       attachment: null,
       call: {
         status,
+        mode: normalizeCallMode(mode),
         createdAt: Date.now()
       }
     });
@@ -315,6 +339,10 @@ function createLanServer({ port = 4000, userDataPath }) {
     saveDb();
 
     return { ok: true, message };
+  }
+
+  function normalizeCallMode(mode) {
+    return mode === 'audio' ? 'audio' : 'video';
   }
 
   function buildReplyToSnapshot(original) {
@@ -515,52 +543,49 @@ function createLanServer({ port = 4000, userDataPath }) {
     res.json({ messages: getMessages(me, peer, me).map(serializeMessage) });
   });
 
-  app.post('/api/upload', upload.single('file'), (req, res) => {
+  app.post('/api/upload', upload.any(), (req, res) => {
     const fromUserId = String(req.body?.fromUserId || '');
     const toUserId = String(req.body?.toUserId || '');
     const text = String(req.body?.text || '');
     const replyToMessageId = String(req.body?.replyToMessageId || '');
     const sender = getUserById(fromUserId);
     const receiver = getUserById(toUserId);
-
-    if (!sender || !receiver || !req.file) {
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
+  
+    if (!sender || !receiver || !uploadedFiles.length) {
       return res.status(400).json({ error: 'Invalid upload request' });
     }
-
-    const attachment = {
-      filename: req.file.originalname,
-      mimeType: req.file.mimetype,
-      size: req.file.size,
-      url: `/uploads/${req.file.filename}`,
-      isImage: /^image\//.test(req.file.mimetype)
-    };
-
+  
+    const attachments = uploadedFiles.map((file) => ({
+      filename: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+      url: `/uploads/${file.filename}`,
+      isImage: /^image\//.test(file.mimetype)
+    }));
+  
     const replyTo = resolveReplyTo(replyToMessageId, fromUserId, toUserId);
-
+  
+    if (attachments.length > 1 && !attachments.every((item) => item.isImage)) {
+      return res.status(400).json({
+        error: 'Only multiple images can be sent as one gallery message'
+      });
+    }
+  
     const message = addMessage({
       fromUserId,
       toUserId,
       text,
-      attachment,
+      attachment: attachments.length === 1 ? attachments[0] : null,
+      attachments: attachments.length > 1 ? attachments : null,
+      type: attachments.length > 1 ? 'gallery' : 'file',
       replyTo
     });
+  
     emitMessageToParticipants(message);
-
-    const systemNotice = addSystemMessage({
-      fromUserId,
-      toUserId,
-      kind: 'file_upload',
-      meta: {
-        actorUserId: fromUserId,
-        filename: attachment.filename,
-        isImage: attachment.isImage
-      }
-    });
-    emitMessageToParticipants(systemNotice);
-
+  
     res.json({
-      message: serializeMessage(message),
-      systemNotice: serializeMessage(systemNotice)
+      message: serializeMessage(message)
     });
   });
 
@@ -730,85 +755,97 @@ function createLanServer({ port = 4000, userDataPath }) {
       }
     });
 
-    socket.on('call:invite', ({ fromUserId, toUserId }) => {
+    socket.on('call:invite', ({ fromUserId, toUserId, mode }) => {
       const targetSocketId = onlineSockets.get(toUserId);
       const key = conversationKey(fromUserId, toUserId);
-
+      const callMode = normalizeCallMode(mode);
+    
       clearActiveCall(key);
-
+    
       const history = addCallHistory({
         fromUserId,
         toUserId,
-        status: 'incoming'
+        status: 'incoming',
+        mode: callMode
       });
       emitMessageToParticipants(history);
-
+    
       const timeoutId = setTimeout(() => {
         const current = activeCalls.get(key);
         if (!current) return;
-
+    
         activeCalls.delete(key);
-
+    
         const unanswered = addCallHistory({
-          fromUserId,
-          toUserId,
-          status: 'unanswered'
+          fromUserId: current.fromUserId,
+          toUserId: current.toUserId,
+          status: 'unanswered',
+          mode: current.mode
         });
         emitMessageToParticipants(unanswered);
-        emitCallEndedToParticipants(fromUserId, toUserId);
+        emitCallEndedToParticipants(current.fromUserId, current.toUserId);
       }, CALL_TIMEOUT_MS);
-
-      activeCalls.set(key, { fromUserId, toUserId, timeoutId });
-
-      if (targetSocketId) io.to(targetSocketId).emit('call:invite', { fromUserId });
+    
+      activeCalls.set(key, { fromUserId, toUserId, mode: callMode, timeoutId });
+    
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call:invite', { fromUserId, mode: callMode });
+      }
     });
-
+    
     socket.on('call:accept', ({ fromUserId, toUserId }) => {
       const targetSocketId = onlineSockets.get(toUserId);
       const key = conversationKey(fromUserId, toUserId);
-
-      clearActiveCall(key);
-
+      const active = clearActiveCall(key);
+      const callMode = active?.mode || 'video';
+    
       const history = addCallHistory({
         fromUserId,
         toUserId,
-        status: 'accepted'
+        status: 'accepted',
+        mode: callMode
       });
       emitMessageToParticipants(history);
-
-      if (targetSocketId) io.to(targetSocketId).emit('call:accepted', { fromUserId });
+    
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call:accepted', { fromUserId, mode: callMode });
+      }
     });
-
+    
     socket.on('call:decline', ({ fromUserId, toUserId }) => {
       const targetSocketId = onlineSockets.get(toUserId);
       const key = conversationKey(fromUserId, toUserId);
-
-      clearActiveCall(key);
-
+      const active = clearActiveCall(key);
+      const callMode = active?.mode || 'video';
+    
       const history = addCallHistory({
         fromUserId,
         toUserId,
-        status: 'declined'
+        status: 'declined',
+        mode: callMode
       });
       emitMessageToParticipants(history);
-
-      if (targetSocketId) io.to(targetSocketId).emit('call:declined', { fromUserId });
+    
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('call:declined', { fromUserId, mode: callMode });
+      }
       emitCallEndedToParticipants(toUserId, fromUserId);
     });
-
+    
     socket.on('call:end', ({ fromUserId, toUserId }) => {
       const key = conversationKey(fromUserId, toUserId);
       const active = clearActiveCall(key);
-
+    
       if (active) {
         const unanswered = addCallHistory({
-          fromUserId,
-          toUserId,
-          status: 'unanswered'
+          fromUserId: active.fromUserId,
+          toUserId: active.toUserId,
+          status: 'unanswered',
+          mode: active.mode
         });
         emitMessageToParticipants(unanswered);
       }
-
+    
       emitCallEndedToParticipants(fromUserId, toUserId);
     });
 

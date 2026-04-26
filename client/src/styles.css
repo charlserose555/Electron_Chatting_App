@@ -398,6 +398,65 @@ button {
   border-bottom-right-radius: 8px;
 }
 
+.bubble.telegram-inline-meta {
+  position: relative;
+}
+
+.message-text.with-inline-meta {
+  position: relative;
+  display: block;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+  line-height: 1.42;
+}
+
+.message-text-content {
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.message-inline-meta-spacer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.message-inline-meta {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.message-inline-meta .bubble-time {
+  font-size: 11px;
+  line-height: 1;
+}
+
+.message-inline-meta .tg-status {
+  margin-left: 1px;
+  transform: translateY(0.5px);
+}
+
+.message-inline-meta.mine .bubble-time {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.message-inline-meta:not(.mine) .bubble-time {
+  color: rgba(232, 241, 255, 0.72);
+}
+
 .message-row:not(.mine) .bubble {
   border-bottom-left-radius: 8px;
 }
@@ -1044,4 +1103,232 @@ button {
 
 .online-dot.idle {
   background: #fbbf24;
+}
+
+.tg-incoming-call {
+  width: 340px;
+  padding: 18px;
+}
+
+.tg-incoming-call-top {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.tg-incoming-avatar {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  flex: 0 0 auto;
+}
+
+.tg-incoming-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.tg-incoming-badge.audio {
+  background: rgba(34, 197, 94, 0.14);
+  border-color: rgba(34, 197, 94, 0.24);
+  color: #d9ffe6;
+}
+
+.tg-incoming-badge.video {
+  background: rgba(79, 140, 255, 0.14);
+  border-color: rgba(79, 140, 255, 0.24);
+  color: #dbe8ff;
+}
+
+.tg-incoming-badge-icon {
+  line-height: 1;
+  font-size: 13px;
+}
+
+.tg-incoming-call .incoming-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.tg-incoming-call .incoming-body {
+  color: var(--muted);
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.chat-panel {
+  position: relative;
+}
+
+.chat-panel.drag-active {
+  box-shadow: 0 0 0 1px rgba(90, 115, 255, 0.35), 0 18px 60px rgba(0, 0, 0, 0.35);
+}
+
+.chat-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  background: rgba(5, 16, 34, 0.58);
+  backdrop-filter: blur(4px);
+  border-radius: 14px;
+  pointer-events: none;
+}
+
+.chat-drop-card {
+  min-width: 280px;
+  padding: 28px 32px;
+  border-radius: 20px;
+  text-align: center;
+  background: rgba(8, 23, 45, 0.96);
+  border: 1px dashed rgba(122, 156, 255, 0.45);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+}
+
+.chat-drop-icon {
+  font-size: 30px;
+  margin-bottom: 10px;
+}
+
+.chat-drop-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.chat-drop-subtitle {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.composer-attachment-thumb {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.composer-attachment-file {
+  width: 46px;
+  height: 46px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  background: rgba(255, 255, 255, 0.06);
+  flex: 0 0 auto;
+}
+
+.composer-attachment-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.composer-attachment-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.composer-attachment-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.composer-attachment-remove {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 4px;
+}
+
+.composer-attachment-remove:hover {
+  color: var(--text);
+}
+
+.gallery-attachment {
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  overflow: hidden;
+  border-radius: 14px;
+}
+
+.gallery-attachment.grid-2,
+.gallery-attachment.grid-3,
+.gallery-attachment.grid-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.gallery-item {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  min-height: 120px;
+}
+
+.gallery-item-image {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  aspect-ratio: 1 / 1;
+}
+
+.gallery-more-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.gallery-caption {
+  margin-top: 8px;
 }
