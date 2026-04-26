@@ -280,6 +280,9 @@ export default function App() {
   const isWindowActiveRef = useRef(isWindowActive);
   const activeMessagesRef = useRef<Message[]>([]);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [deleteChatTargetUserId, setDeleteChatTargetUserId] = useState<string | null>(null);
+  const deleteChatTarget = users.find((u) => u.id === deleteChatTargetUserId) || null;
+  const [deleteMessageTargetId, setDeleteMessageTargetId] = useState<string | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -437,6 +440,8 @@ export default function App() {
 
   useEffect(() => {
     setReplyingTo(null);
+    setDeleteChatTargetUserId(null);
+    setDeleteMessageTargetId(null);
   }, [selectedUserId]);
 
   async function handleConnect() {
@@ -517,6 +522,37 @@ export default function App() {
 
           return next;
         });
+      }
+    );
+
+    socket.on(
+      'conversation:cleared-for-me',
+      ({
+        conversationKey: clearedConversationKey
+      }: {
+        conversationKey: string;
+        userId: string;
+        peerUserId: string;
+        clearedAt: number;
+      }) => {
+        clearConversationLocally(clearedConversationKey);
+        setDeleteChatTargetUserId(null);
+      }
+    );
+
+    socket.on(
+      'message:cleared-for-me',
+      ({
+        messageId,
+        conversationKey: clearedConversationKey
+      }: {
+        messageId: string;
+        conversationKey: string;
+        userId: string;
+        hiddenAt: number;
+      }) => {
+        clearMessageLocally(messageId, clearedConversationKey);
+        setDeleteMessageTargetId(null);
       }
     );
 
@@ -604,6 +640,20 @@ export default function App() {
         kind: 'call'
       });
     });
+
+    socket.on(
+      'conversation:deleted',
+      ({
+        conversationKey: deletedConversationKey
+      }: {
+        conversationKey: string;
+        byUserId: string;
+        peerUserId: string;
+      }) => {
+        clearConversationLocally(deletedConversationKey);
+        setDeleteChatTargetUserId(null);
+      }
+    );
 
     socket.on('call:accepted', async ({ fromUserId }: { fromUserId: string }) => {
       if (currentCallRef.current?.peerUserId !== fromUserId) return;
@@ -878,14 +928,44 @@ export default function App() {
     return normalized.startsWith('file://') ? normalized : `file:///${normalized}`;
   }
 
-  function deleteMessage(messageId: string) {
-    if (!socketRef.current || !me) return;
-
+  function openDeleteMessageDialog(messageId: string) {
+    setDeleteMessageTargetId(messageId);
+    setContextMenu(null);
+  }
+  
+  function clearMessageForMe() {
+    if (!socketRef.current || !me || !deleteMessageTarget) return;
+  
+    socketRef.current.emit(
+      'message:clear-for-me',
+      {
+        userId: me.id,
+        messageId: deleteMessageTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete message for you');
+        }
+      }
+    );
+  }
+  
+  function deleteMessageForEveryone() {
+    if (!socketRef.current || !me || !deleteMessageTarget) return;
+  
     socketRef.current.emit(
       'message:delete',
-      { messageId, byUserId: me.id },
+      {
+        messageId: deleteMessageTarget.id,
+        byUserId: me.id
+      },
       (result: { ok: boolean; error?: string; message?: Message }) => {
-        if (!result.ok) alert(result.error || 'Delete failed');
+        if (!result?.ok) {
+          alert(result?.error || 'Delete failed');
+          return;
+        }
+  
+        setDeleteMessageTargetId(null);
       }
     );
   }
@@ -1039,6 +1119,48 @@ export default function App() {
     return 'offline';
   }
 
+  function clearConversationLocally(conversationKeyValue: string) {
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      delete next[conversationKeyValue];
+      return next;
+    });
+  
+    const activeKey =
+      me && selectedUserIdRef.current ? conversationKey(me.id, selectedUserIdRef.current) : '';
+  
+    if (conversationKeyValue === activeKey) {
+      setReplyingTo(null);
+      setContextMenu(null);
+  
+      requestAnimationFrame(() => {
+        resizeComposerTextarea(true);
+        focusComposer(false);
+        syncMessageViewportState();
+      });
+    }
+  }
+
+  function clearMessageLocally(messageId: string, conversationKeyValue: string) {
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      next[conversationKeyValue] = (next[conversationKeyValue] || []).filter((m) => m.id !== messageId);
+      return next;
+    });
+  
+    if (replyingTo?.id === messageId) {
+      setReplyingTo(null);
+    }
+  
+    if (contextMenu?.messageId === messageId) {
+      setContextMenu(null);
+    }
+  
+    requestAnimationFrame(() => {
+      syncMessageViewportState();
+    });
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -1106,6 +1228,52 @@ export default function App() {
     if (selectedUserIdRef.current && autoScrollRef.current) {
       markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
     }
+  }
+
+  function syncMessageViewportState() {
+    const el = messagesRef.current;
+    if (!el) return;
+  
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const isAwayFromBottom = distanceFromBottom >= 80;
+  
+    autoScrollRef.current = !isAwayFromBottom;
+    setShowScrollToBottom(isAwayFromBottom);
+    updateMessageScrollbar();
+  }
+
+  function clearCurrentConversationForMe() {
+    if (!socketRef.current || !me || !deleteChatTarget) return;
+  
+    socketRef.current.emit(
+      'conversation:clear-for-me',
+      {
+        userId: me.id,
+        peerUserId: deleteChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete chat for you');
+        }
+      }
+    );
+  }
+  
+  function deleteCurrentConversationForEveryone() {
+    if (!socketRef.current || !me || !deleteChatTarget) return;
+  
+    socketRef.current.emit(
+      'conversation:delete',
+      {
+        userId: me.id,
+        peerUserId: deleteChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          alert(result?.error || 'Failed to delete chat for everyone');
+        }
+      }
+    );
   }
 
   function deletedMessageLabel(message: Message, meId: string) {
@@ -1184,6 +1352,11 @@ export default function App() {
     if (!me || !selectedUserId) return [] as Message[];
     return messagesByConv[conversationKey(me.id, selectedUserId)] || [];
   }, [messagesByConv, me, selectedUserId]);
+
+  const deleteMessageTarget = useMemo(() => {
+    if (!deleteMessageTargetId) return null;
+    return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
+  }, [deleteMessageTargetId, activeMessages]);
 
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
@@ -1392,6 +1565,13 @@ export default function App() {
                 <button className="icon-btn" onClick={startCall}>
                   🎥
                 </button>
+                <button
+                  className="icon-btn"
+                  onClick={() => setDeleteChatTargetUserId(selectedUser.id)}
+                  title="Delete chat"
+                >
+                  🗑
+                </button>
               </div>
             </header>
 
@@ -1586,6 +1766,74 @@ export default function App() {
         )}
       </main>
 
+      {deleteChatTarget ? (
+        <div className="call-overlay">
+          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
+            <div className="call-top">
+              <div>
+                <div className="call-name">Delete chat</div>
+                <div className="call-sub">Choose how to delete chat with {deleteChatTarget.name}</div>
+              </div>
+            </div>
+
+            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+              Delete for me hides the current chat only on your app.
+              <br />
+              Delete for everyone removes the chat history for both users.
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
+                Cancel
+              </button>
+              <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
+                Delete for me
+              </button>
+              <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
+                Delete for everyone
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteMessageTarget ? (
+        <div className="call-overlay">
+          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
+            <div className="call-top">
+              <div>
+                <div className="call-name">Delete message</div>
+                <div className="call-sub">
+                  Choose how to delete this message
+                </div>
+              </div>
+            </div>
+
+            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+              Delete for me hides this message only on your app.
+              <br />
+              {deleteMessageTarget.fromUserId === me.id
+                ? 'Delete for everyone replaces the message for both users.'
+                : 'You can delete this message for yourself.'}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
+                Cancel
+              </button>
+              <button className="icon-btn wide" onClick={clearMessageForMe}>
+                Delete for me
+              </button>
+              {deleteMessageTarget.fromUserId === me.id ? (
+                <button className="danger wide" onClick={deleteMessageForEveryone}>
+                  Delete for everyone
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {incomingFromUserId ? (
         <div className="incoming-box">
           <div className="incoming-title">Incoming call</div>
@@ -1650,17 +1898,12 @@ export default function App() {
             Reply
           </button>
 
-          {contextTargetMessage?.fromUserId === me.id ? (
-            <button
-              className="context-menu-item danger"
-              onClick={() => {
-                deleteMessage(contextMenu.messageId);
-                setContextMenu(null);
-              }}
-            >
-              Delete message
-            </button>
-          ) : null}
+          <button
+            className="context-menu-item danger"
+            onClick={() => openDeleteMessageDialog(contextMenu.messageId)}
+          >
+            Delete message
+          </button>
         </div>
       ) : null}
     </div>
