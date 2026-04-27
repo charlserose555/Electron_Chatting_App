@@ -19,6 +19,14 @@ type ReplyTo = {
   isImage: boolean;
 };
 
+type ToastTone = 'info' | 'success' | 'error';
+
+type AppToast = {
+  id: number;
+  message: string;
+  tone: ToastTone;
+};
+
 type CallMode = 'audio' | 'video';
 
 type Message = {
@@ -105,6 +113,40 @@ function hashCode(str: string) {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
   return h;
+}
+
+function getCallDeviceErrorMessage(error: unknown, mode: CallMode) {
+  const err = error as DOMException | undefined;
+
+  switch (err?.name) {
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return mode === 'audio'
+        ? 'No microphone was found. Please connect a microphone and try again.'
+        : 'Camera or microphone was not found. Please connect your devices and try again.';
+
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+      return mode === 'audio'
+        ? 'Microphone access was denied. Please allow microphone permission and try again.'
+        : 'Camera or microphone access was denied. Please allow permission and try again.';
+
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return mode === 'audio'
+        ? 'Your microphone is being used by another app or is unavailable.'
+        : 'Your camera or microphone is being used by another app or is unavailable.';
+
+    case 'OverconstrainedError':
+      return mode === 'audio'
+        ? 'No matching microphone device is available.'
+        : 'No matching camera or microphone device is available.';
+
+    default:
+      return mode === 'audio'
+        ? 'Unable to start the voice call. Please check your microphone.'
+        : 'Unable to start the video call. Please check your camera and microphone.';
+  }
 }
 
 function avatarBg(seed: string) {
@@ -645,6 +687,10 @@ export default function App() {
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const pendingUploadsRef = useRef<PendingUpload[]>([]);
   const [lightbox, setLightbox] = useState<LightboxState>(null);  
+  const meRef = useRef<User | null>(null);
+  const localStreamPromiseRef = useRef<Promise<MediaStream> | null>(null);
+  const [toast, setToast] = useState<AppToast | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -658,6 +704,10 @@ export default function App() {
     onOpenFileDialog: async () => [],
     onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {}
   };
+
+  useEffect(() => {
+    meRef.current = me;
+  }, [me]);
 
   useEffect(() => {
     currentCallRef.current = callState;
@@ -692,6 +742,14 @@ export default function App() {
       pendingUploadsRef.current.forEach((item) => {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
     };
   }, []);
 
@@ -890,6 +948,7 @@ export default function App() {
     localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
 
     setMe(loginData.user);
+    meRef.current = loginData.user;
     setUsers(loginData.users || []);
     setConnectedServerUrl(serverUrl);
 
@@ -1079,25 +1138,33 @@ export default function App() {
     socket.on('call:accepted', async ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
       if (currentCallRef.current?.peerUserId !== fromUserId) return;
     
-      const callMode = currentCallRef.current?.mode || mode || 'video';
+      try {
+        const callMode = currentCallRef.current?.mode || mode || 'video';
     
-      setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
-      setCallStatus(
-        callMode === 'audio'
-          ? 'Creating secure local voice connection...'
-          : 'Creating secure local video connection...'
-      );
+        setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
+        setCallStatus(
+          callMode === 'audio'
+            ? 'Creating secure local voice connection...'
+            : 'Creating secure local video connection...'
+        );
     
-      const stream = await ensureLocalStream(callMode);
-      const peer = createPeer(fromUserId, stream);
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
+        const stream = await ensureLocalStream(callMode);
+        const peer = createPeer(fromUserId, stream);
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
     
-      socket.emit('signal', {
-        fromUserId: loginData.user.id,
-        toUserId: fromUserId,
-        data: { type: 'offer', payload: offer }
-      });
+        socket.emit('signal', {
+          fromUserId: loginData.user.id,
+          toUserId: fromUserId,
+          data: { type: 'offer', payload: offer }
+        });
+      } catch (error) {
+        const callMode = currentCallRef.current?.mode || mode || 'video';
+        const message = getCallDeviceErrorMessage(error, callMode);
+        setCallStatus(message);
+        showToast(message, 'error', 4200);
+        cleanupCall(false);
+      }
     });
 
     socket.on('call:declined', ({ fromUserId }: { fromUserId: string }) => {
@@ -1164,6 +1231,10 @@ export default function App() {
           }
         } catch (error) {
           console.error('signal failure', error);
+          const message = 'Unable to establish the local connection.';
+          setCallStatus(message);
+          showToast(message, 'error', 4200);
+          cleanupCall(false);
         }
       }
     );
@@ -1173,15 +1244,26 @@ export default function App() {
     if (peerRef.current) return peerRef.current;
   
     const socket = socketRef.current;
-    if (!socket || !me) throw new Error('Socket not ready');
+    const currentMe = meRef.current;
+  
+    if (!socket) {
+      throw new Error('Socket not ready');
+    }
+  
+    if (!currentMe) {
+      throw new Error('Current user not ready');
+    }
   
     const peer = new RTCPeerConnection();
-    stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+  
+    stream.getTracks().forEach((track) => {
+      peer.addTrack(track, stream);
+    });
   
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('signal', {
-          fromUserId: me.id,
+          fromUserId: currentMe.id,
           toUserId: remoteUserId,
           data: { type: 'candidate', payload: event.candidate }
         });
@@ -1189,7 +1271,8 @@ export default function App() {
     };
   
     peer.ontrack = (event) => {
-      setRemoteStreamState(event.streams[0]);
+      const [remoteStream] = event.streams;
+      setRemoteStreamState(remoteStream);
     };
   
     peer.onconnectionstatechange = () => {
@@ -1288,11 +1371,15 @@ export default function App() {
 
   function cleanupCall(notifyPeer: boolean) {
     const peerUserId =
-      currentCallRef.current?.peerUserId || callState?.peerUserId || incomingFromUserIdRef.current;
+      currentCallRef.current?.peerUserId ||
+      callState?.peerUserId ||
+      incomingFromUserIdRef.current;
   
-    if (notifyPeer && peerUserId && socketRef.current && me) {
+    const currentMe = meRef.current;
+  
+    if (notifyPeer && peerUserId && socketRef.current && currentMe) {
       socketRef.current.emit('call:end', {
-        fromUserId: me.id,
+        fromUserId: currentMe.id,
         toUserId: peerUserId
       });
     }
@@ -1305,6 +1392,7 @@ export default function App() {
     }
   
     localStreamRef.current = null;
+    localStreamPromiseRef.current = null;
     currentCallRef.current = null;
     incomingFromUserIdRef.current = null;
   
@@ -1498,6 +1586,15 @@ export default function App() {
   async function startCall(mode: CallMode) {
     if (!socketRef.current || !me || !selectedUserId) return;
   
+    try {
+      await ensureLocalStream(mode);
+    } catch (error) {
+      const message = getCallDeviceErrorMessage(error, mode);
+      setCallStatus(message);
+      showToast(message, 'error', 4200);
+      return;
+    }
+  
     const nextCallState: CallState = {
       peerUserId: selectedUserId,
       mode,
@@ -1514,14 +1611,6 @@ export default function App() {
         : `Video calling ${userName(selectedUserId)}...`
     );
   
-    ensureLocalStream(mode).catch(() =>
-      setCallStatus(
-        mode === 'audio'
-          ? 'Microphone permission denied'
-          : 'Camera/microphone permission denied'
-      )
-    );
-  
     socketRef.current.emit('call:invite', {
       fromUserId: me.id,
       toUserId: selectedUserId,
@@ -1534,6 +1623,15 @@ export default function App() {
   
     const mode = incomingCallModeRef.current || 'video';
   
+    try {
+      await ensureLocalStream(mode);
+    } catch (error) {
+      const message = getCallDeviceErrorMessage(error, mode);
+      setCallStatus(message);
+      showToast(message, 'error', 4200);
+      return;
+    }
+  
     const nextCallState: CallState = {
       peerUserId: incomingFromUserId,
       mode,
@@ -1545,14 +1643,6 @@ export default function App() {
     currentCallRef.current = nextCallState;
     incomingFromUserIdRef.current = null;
     setCallState(nextCallState);
-  
-    ensureLocalStream(mode).catch(() =>
-      setCallStatus(
-        mode === 'audio'
-          ? 'Microphone permission denied'
-          : 'Camera/microphone permission denied'
-      )
-    );
   
     socketRef.current.emit('call:accept', {
       fromUserId: me.id,
@@ -1595,6 +1685,31 @@ export default function App() {
     setCallState((prev) => (prev ? { ...prev, cameraOff: nextOff } : prev));
   }
 
+  function dismissToast() {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
+  }
+  
+  function showToast(message: string, tone: ToastTone = 'info', duration = 3600) {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+  
+    setToast({
+      id: Date.now(),
+      message,
+      tone
+    });
+  
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, duration);
+  }
+
   function canMarkConversationAsRead(peerUserId: string) {
     return (
       !!me &&
@@ -1622,6 +1737,40 @@ export default function App() {
           byUserId: me.id
         });
       });
+  }
+
+  function getCallDeviceErrorMessage(error: unknown, mode: CallMode) {
+    const err = error as DOMException | undefined;
+  
+    switch (err?.name) {
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        return mode === 'audio'
+          ? 'No microphone was found. Please connect a microphone and try again.'
+          : 'Camera or microphone was not found. Please connect your devices and try again.';
+  
+      case 'NotAllowedError':
+      case 'PermissionDeniedError':
+        return mode === 'audio'
+          ? 'Microphone access was denied. Please allow microphone permission and try again.'
+          : 'Camera or microphone access was denied. Please allow permission and try again.';
+  
+      case 'NotReadableError':
+      case 'TrackStartError':
+        return mode === 'audio'
+          ? 'Your microphone is being used by another app or is unavailable.'
+          : 'Your camera or microphone is being used by another app or is unavailable.';
+  
+      case 'OverconstrainedError':
+        return mode === 'audio'
+          ? 'No matching microphone device is available.'
+          : 'No matching camera or microphone device is available.';
+  
+      default:
+        return mode === 'audio'
+          ? 'Unable to start the voice call. Please check your microphone.'
+          : 'Unable to start the video call. Please check your camera and microphone.';
+    }
   }
 
   function resizeComposerTextarea(resetToOneRow = false) {
@@ -2085,6 +2234,37 @@ export default function App() {
     });
   }, [users, me, search, messagesByConv]);
 
+  const groupedContacts = useMemo(() => {
+    const onlineSet = new Set(onlineUserIds);
+    const idleSet = new Set(idleUserIds);
+  
+    const getLastTime = (userId: string) => {
+      const conv = messagesByConv[conversationKey(me!.id, userId)] || [];
+      return conv.length ? conv[conv.length - 1].createdAt : 0;
+    };
+  
+    const sortByRecent = (a: User, b: User) => {
+      const diff = getLastTime(b.id) - getLastTime(a.id);
+      return diff || a.name.localeCompare(b.name);
+    };
+  
+    const online: User[] = [];
+    const offline: User[] = [];
+  
+    for (const user of visibleUsers) {
+      if (onlineSet.has(user.id) || idleSet.has(user.id)) {
+        online.push(user);
+      } else {
+        offline.push(user);
+      }
+    }
+  
+    online.sort(sortByRecent);
+    offline.sort(sortByRecent);
+  
+    return { online, offline };
+  }, [visibleUsers, onlineUserIds, idleUserIds, messagesByConv, me]);
+
   const selectedUser = users.find((u) => u.id === selectedUserId) || null;
 
   const activeMessages = useMemo(() => {
@@ -2217,6 +2397,7 @@ export default function App() {
             onClick={() => {
               cleanupCall(true);
               socketRef.current?.disconnect();
+              meRef.current = null;
               setMe(null);
             }}
           >
@@ -2237,37 +2418,77 @@ export default function App() {
         </div>
 
         <div className="contact-list">
-          {visibleUsers.map((user) => {
-            const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-            const last = conv[conv.length - 1];
-            const online = onlineUserIds.includes(user.id);
-            const presence = getPresence(user.id);
+          {groupedContacts.online.length ? (
+            <div className="contact-group">
+              <div className="contact-group-title">Online</div>
 
-            return (
-              <button
-                key={user.id}
-                className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
-                onClick={() => setSelectedUserId(user.id)}
-              >
-                <div className="contact-avatar-wrap">
-                  <div className="avatar" style={{ background: avatarBg(user.id) }}>
-                    {getInitials(user.name)}
-                  </div>
-                  {presence !== 'offline' ? (
-                    <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
-                  ) : null}
-                </div>
+              {groupedContacts.online.map((user) => {
+                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                const last = conv[conv.length - 1];
+                const presence = getPresence(user.id);
 
-                <div className="contact-text">
-                  <div className="contact-head">
-                    <span className="contact-name">{user.name}</span>
-                    <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-                  </div>
-                  <div className="contact-preview">{typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}</div>
-                </div>
-              </button>
-            );
-          })}
+                return (
+                  <button
+                    key={user.id}
+                    className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedUserId(user.id)}
+                  >
+                    <div className="contact-avatar-wrap">
+                      <div className="avatar" style={{ background: avatarBg(user.id) }}>
+                        {getInitials(user.name)}
+                      </div>
+                      <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
+                    </div>
+
+                    <div className="contact-text">
+                      <div className="contact-head">
+                        <span className="contact-name">{user.name}</span>
+                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                      </div>
+                      <div className="contact-preview">
+                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {groupedContacts.offline.length ? (
+            <div className="contact-group">
+              <div className="contact-group-title offline">Offline</div>
+
+              {groupedContacts.offline.map((user) => {
+                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                const last = conv[conv.length - 1];
+
+                return (
+                  <button
+                    key={user.id}
+                    className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedUserId(user.id)}
+                  >
+                    <div className="contact-avatar-wrap">
+                      <div className="avatar" style={{ background: avatarBg(user.id) }}>
+                        {getInitials(user.name)}
+                      </div>
+                    </div>
+
+                    <div className="contact-text">
+                      <div className="contact-head">
+                        <span className="contact-name">{user.name}</span>
+                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                      </div>
+                      <div className="contact-preview">
+                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       </aside>
 
@@ -2310,10 +2531,6 @@ export default function App() {
                 <button className="icon-btn" onClick={() => { void startCall('video'); }} title="Video call">
                   🎥
                 </button>
-
-                <button className="success" onClick={() => { void acceptCall(); }}>
-                  Accept
-                </button>
                 <button
                   className="icon-btn"
                   onClick={() => setDeleteChatTargetUserId(selectedUser.id)}
@@ -2343,7 +2560,13 @@ export default function App() {
 
                   return (
                     <div key={m.id} data-message-id={m.id}>
-                      {showDivider ? <div className="divider">{dateDivider(m.createdAt)}</div> : null}
+                      {showDivider ? (
+                        <div className="system-chip-row date-chip-row">
+                          <div className="system-chip date-chip">
+                            <span className="system-chip-text">{dateDivider(m.createdAt)}</span>
+                          </div>
+                        </div>
+                      ) : null}
 
                       {m.type === 'call' || m.type === 'deleted' || m.type === 'system' ? (
                         <div className="system-chip-row">
@@ -2794,6 +3017,26 @@ export default function App() {
         onNext={showNextLightbox}
         onSelect={jumpToLightboxIndex}
       />
+
+      {toast ? (
+        <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
+          <div className="app-toast-content">
+            <span className="app-toast-icon">
+              {toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '⚠' : 'i'}
+            </span>
+            <span className="app-toast-message">{toast.message}</span>
+          </div>
+
+          <button
+            type="button"
+            className="app-toast-close"
+            onClick={dismissToast}
+            aria-label="Dismiss notification"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }

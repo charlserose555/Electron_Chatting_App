@@ -1843,3 +1843,161 @@ button {
   object-fit: cover;
   display: block;
 }
+
+.app-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 9999;
+  min-width: 320px;
+  max-width: min(460px, calc(100vw - 32px));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.32);
+  animation: toast-in 180ms ease-out;
+}
+
+.app-toast.info {
+  background: rgba(24, 32, 48, 0.94);
+  color: #eef4ff;
+}
+
+.app-toast.success {
+  background: rgba(17, 44, 30, 0.96);
+  color: #eafff2;
+}
+
+.app-toast.error {
+  background: rgba(58, 24, 24, 0.96);
+  color: #fff1f1;
+}
+
+.app-toast-content {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+.app-toast-icon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.app-toast-message {
+  font-size: 14px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.app-toast-close {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.72;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px;
+  border-radius: 8px;
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+
+.app-toast-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.date-chip-row {
+  margin: 10px 0 14px;
+}
+
+.date-chip {
+  padding: 8px 14px;
+  min-height: auto;
+  border-radius: 999px;
+  justify-content: center;
+  gap: 0;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+}
+
+.date-chip .system-chip-text {
+  font-size: 13px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.72);
+  font-weight: 500;
+}
+
+.contact-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.contact-group + .contact-group {
+  margin-top: 14px;
+}
+
+.contact-group-title {
+  padding: 6px 12px 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b9ccf5;
+}
+
+.contact-group-title.offline {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.contact-card.offline {
+  opacity: 0.72;
+}
+
+.contact-card.offline .avatar {
+  filter: saturate(0.45) brightness(0.92);
+}
+
+.contact-card.offline .contact-name {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.contact-card.offline .contact-preview,
+.contact-card.offline .contact-time {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.contact-card.offline:hover,
+.contact-card.offline.selected {
+  opacity: 1;
+}
