@@ -715,6 +715,8 @@ export default function App() {
   const toastTimerRef = useRef<number | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [adminSearch, setAdminSearch] = useState('');
+  const suppressAutoReadUntilBottomRef = useRef(false);
+  const hasUserScrolledCurrentChatRef = useRef(false);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -726,7 +728,8 @@ export default function App() {
     },
     notify: async (_opts: { title: string; body: string; userId?: string; kind?: 'message' | 'call' }) => {},
     onOpenFileDialog: async () => [],
-    onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {}
+    onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {},
+    setBadgeCount: async (_count: number) => {}
   };
 
   useEffect(() => {
@@ -932,6 +935,9 @@ export default function App() {
     incomingCallModeRef.current = null;
     clearPendingUploads();
     setLightbox(null);
+  
+    suppressAutoReadUntilBottomRef.current = false;
+    hasUserScrolledCurrentChatRef.current = false;
   }, [selectedUserId]);
 
   async function handleConnect() {
@@ -1084,19 +1090,21 @@ export default function App() {
     socketRef.current = socket;
   
     socket.on('connect', () => {
-      socket.emit('auth:join', { token: data.token }, (payload: any) => {
+      socket.emit('auth:join', { token: data.token }, async (payload: any) => {
         if (!payload?.ok) {
-          showError(payload?.error || 'Socket login failed')
+          showError(payload?.error || 'Socket login failed');
           return;
         }
-  
+      
         setUsers(payload.users || []);
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
-  
+      
         const fallback = payload.users.find((u: User) => u.id !== data.user.id)?.id || '';
         setSelectedUserId((curr) => curr || fallback);
-
+      
+        await loadAllHistories(payload.users || [], data.token);
+      
         showSuccess(`Welcome, ${data.user.name || data.user.userId}!`);
       });
     });
@@ -1166,10 +1174,11 @@ export default function App() {
     socket.on('users:changed', () => {
       socket.emit(
         'users:sync',
-        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+        async (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
           setUsers(payload.users);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
+          await loadAllHistories(payload.users || []);
         }
       );
     });
@@ -1216,7 +1225,9 @@ export default function App() {
           byUserId: data.user.id
         });
       
-        if (canMarkConversationAsRead(message.fromUserId)) {
+        const shouldAffectUnread = isUnreadAffectingMessage(message, data.user.id);
+      
+        if (!shouldAffectUnread || canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
             byUserId: data.user.id
@@ -1470,6 +1481,23 @@ export default function App() {
     return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext || '');
   }
 
+  function isUnreadAffectingMessage(message: Message, meId: string) {
+    if (message.type === 'text' || message.type === 'file' || message.type === 'gallery') {
+      return true;
+    }
+  
+    // Count only missed incoming calls as unread
+    if (message.type === 'call') {
+      return message.fromUserId !== meId && message.call?.status === 'unanswered';
+    }
+  
+    return false;
+  }
+  
+  function isMessageStatusVisible(message: Message) {
+    return message.type === 'text' || message.type === 'file' || message.type === 'gallery';
+  }
+
   function guessMimeTypeFromName(fileName: string) {
     const ext = fileName.split('.').pop()?.toLowerCase() || '';
   
@@ -1611,6 +1639,10 @@ export default function App() {
     });
   }
 
+  function registerManualMessageScroll() {
+    hasUserScrolledCurrentChatRef.current = true;
+  }
+
   async function loadHistory(peerUserId: string, forceScroll = false) {
     if (!connectedServerUrl || !me) return;
   
@@ -1633,6 +1665,40 @@ export default function App() {
     }
   }
 
+  async function loadAllHistories(userList: User[], tokenOverride?: string) {
+    const currentMe = meRef.current;
+    if (!currentMe) return;
+  
+    const peers = userList.filter((u) => u.id !== currentMe.id);
+    if (!peers.length) return;
+  
+    const entries = await Promise.all(
+      peers.map(async (peer) => {
+        try {
+          const res = await apiFetch(
+            `/api/messages/${currentMe.id}/${peer.id}`,
+            {},
+            tokenOverride
+          );
+          const data = await res.json().catch(() => ({}));
+  
+          if (!res.ok) {
+            return [conversationKey(currentMe.id, peer.id), []] as const;
+          }
+  
+          return [conversationKey(currentMe.id, peer.id), data.messages || []] as const;
+        } catch {
+          return [conversationKey(currentMe.id, peer.id), []] as const;
+        }
+      })
+    );
+  
+    setMessagesByConv((prev) => ({
+      ...prev,
+      ...Object.fromEntries(entries)
+    }));
+  }
+
   async function sendMessage() {
     if (pendingUploads.length > 0) {
       await uploadPreparedFiles(pendingUploads);
@@ -1652,6 +1718,8 @@ export default function App() {
       text,
       replyToMessageId: replyingTo?.id || null
     });
+    
+    forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
   
     setReplyingTo(null);
   
@@ -1914,8 +1982,8 @@ export default function App() {
     return (
       !!me &&
       selectedUserIdRef.current === peerUserId &&
-      autoScrollRef.current &&
-      isWindowActiveRef.current
+      isWindowActiveRef.current &&
+      isMessagesNearBottom()
     );
   }
 
@@ -1931,14 +1999,59 @@ export default function App() {
     setAdminUsers(data.users || []);
   }
 
-  async function apiFetch(path: string, init: RequestInit = {}) {
+  async function apiFetch(path: string, init: RequestInit = {}, tokenOverride?: string) {
     const headers = new Headers(init.headers || {});
-    if (authToken) {
-      headers.set('Authorization', `Bearer ${authToken}`);
+    const token = tokenOverride || authToken || localStorage.getItem('lan_chat_auth_token') || '';
+  
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
     }
+  
     return fetch(`${connectedServerUrl || serverUrlInput}${path}`, {
       ...init,
       headers
+    });
+  }
+  
+  function getUnreadIncomingMessages(peerUserId: string, sourceMessages: Message[]) {
+    if (!me) return [];
+  
+    return sourceMessages.filter(
+      (m) =>
+        m.fromUserId === peerUserId &&
+        m.toUserId === me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !m.readAt
+    );
+  }
+  
+  function markConversationAsReadLocally(peerUserId: string, sourceMessages: Message[]) {
+    if (!me) return;
+  
+    const unreadIds = new Set(
+      getUnreadIncomingMessages(peerUserId, sourceMessages).map((m) => m.id)
+    );
+  
+    if (!unreadIds.size) return;
+  
+    const now = Date.now();
+  
+    setMessagesByConv((prev) => {
+      const key = conversationKey(me.id, peerUserId);
+      const current = prev[key] || [];
+  
+      return {
+        ...prev,
+        [key]: current.map((m) =>
+          unreadIds.has(m.id)
+            ? {
+                ...m,
+                deliveredAt: m.deliveredAt ?? now,
+                readAt: now
+              }
+            : m
+        )
+      };
     });
   }
   
@@ -1946,20 +2059,33 @@ export default function App() {
     if (!socketRef.current || !me) return;
     if (!canMarkConversationAsRead(peerUserId)) return;
   
-    sourceMessages
-      .filter(
-        (m) =>
-          m.fromUserId === peerUserId &&
-          m.toUserId === me.id &&
-          m.type !== 'deleted' &&
-          !m.readAt
-      )
-      .forEach((m) => {
-        socketRef.current?.emit('message:read', {
-          messageId: m.id,
-          byUserId: me.id
-        });
+    const unreadMessages = getUnreadIncomingMessages(peerUserId, sourceMessages);
+    if (!unreadMessages.length) return;
+  
+    markConversationAsReadLocally(peerUserId, sourceMessages);
+  
+    unreadMessages.forEach((m) => {
+      socketRef.current?.emit('message:read', {
+        messageId: m.id,
+        byUserId: me.id
       });
+    });
+  }
+  
+  function forceMarkConversationAsRead(peerUserId: string, sourceMessages: Message[]) {
+    if (!socketRef.current || !me) return;
+  
+    const unreadMessages = getUnreadIncomingMessages(peerUserId, sourceMessages);
+    if (!unreadMessages.length) return;
+  
+    markConversationAsReadLocally(peerUserId, sourceMessages);
+  
+    unreadMessages.forEach((m) => {
+      socketRef.current?.emit('message:read', {
+        messageId: m.id,
+        byUserId: me.id
+      });
+    });
   }
 
   function getCallDeviceErrorMessage(error: unknown, mode: CallMode) {
@@ -2185,6 +2311,8 @@ export default function App() {
         }
       }
     }
+
+    forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
   
     clearPendingUploads();
     setDraft('');
@@ -2273,6 +2401,14 @@ export default function App() {
     return list.find((u) => u.id === userId)?.name || userId;
   }
 
+  function isMessagesNearBottom(threshold = 48) {
+    const el = messagesRef.current;
+    if (!el) return false;
+  
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    return distanceFromBottom <= threshold;
+  }
+
   function messageStatusType(message: Message) {
     if (message.type === 'deleted') return 'none';
     if (message.readAt) return 'read';
@@ -2329,8 +2465,24 @@ export default function App() {
   function handleMessagesScroll() {
     syncMessageViewportState();
   
-    if (selectedUserIdRef.current && autoScrollRef.current) {
-      markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
+    const peerUserId = selectedUserIdRef.current;
+    if (!peerUserId) return;
+  
+    const nearBottom = isMessagesNearBottom();
+  
+    if (suppressAutoReadUntilBottomRef.current) {
+      if (!hasUserScrolledCurrentChatRef.current) return;
+      if (!nearBottom) return;
+  
+      suppressAutoReadUntilBottomRef.current = false;
+      autoScrollRef.current = true;
+      markUnreadMessagesAsRead(peerUserId, activeMessagesRef.current);
+      return;
+    }
+  
+    if (nearBottom) {
+      autoScrollRef.current = true;
+      markUnreadMessagesAsRead(peerUserId, activeMessagesRef.current);
     }
   }
 
@@ -2503,6 +2655,46 @@ export default function App() {
     return messagesByConv[conversationKey(me.id, selectedUserId)] || [];
   }, [messagesByConv, me, selectedUserId]);
 
+  const unreadCountByUser = useMemo(() => {
+    if (!me) return {} as Record<string, number>;
+  
+    const result: Record<string, number> = {};
+  
+    for (const user of users) {
+      if (user.id === me.id) continue;
+  
+      const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+  
+      result[user.id] = conv.filter(
+        (m) =>
+          m.fromUserId === user.id &&
+          m.toUserId === me.id &&
+          isUnreadAffectingMessage(m, me.id) &&
+          !m.readAt
+      ).length;
+    }
+  
+    return result;
+  }, [messagesByConv, users, me]);
+  
+  const totalUnreadCount = useMemo(() => {
+    return Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
+  }, [unreadCountByUser]);
+  
+  const firstUnreadMessageId = useMemo(() => {
+    if (!me || !selectedUserId) return null;
+  
+    const firstUnread = activeMessages.find(
+      (m) =>
+        m.fromUserId === selectedUserId &&
+        m.toUserId === me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !m.readAt
+    );
+  
+    return firstUnread?.id || null;
+  }, [activeMessages, me, selectedUserId]);
+
   const deleteMessageTarget = useMemo(() => {
     if (!deleteMessageTargetId) return null;
     return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
@@ -2531,11 +2723,6 @@ export default function App() {
     focusComposer();
   }, [selectedUserId]);
 
-  useEffect(() => {
-    if (!selectedUserId) return;
-    markUnreadMessagesAsRead(selectedUserId, activeMessages);
-  }, [activeMessages, selectedUserId, isWindowActive]);
-
   // useEffect(() => {
   //   requestAnimationFrame(() => {
   //     syncMessageViewportState();
@@ -2543,12 +2730,46 @@ export default function App() {
   // }, [activeMessages]);
 
   useEffect(() => {
-    smoothScrollToBottom(true, false);
-  }, [activeMessages]);
+    if (!selectedUserId) return;
+  
+    requestAnimationFrame(() => {
+      if (firstUnreadMessageId) {
+        suppressAutoReadUntilBottomRef.current = true;
+        hasUserScrolledCurrentChatRef.current = false;
+  
+        const el = document.querySelector(
+          `[data-message-id="${firstUnreadMessageId}"]`
+        ) as HTMLElement | null;
+  
+        if (el) {
+          el.scrollIntoView({ behavior: 'auto', block: 'center' });
+          autoScrollRef.current = false;
+          syncMessageViewportState();
+          return;
+        }
+      }
+  
+      suppressAutoReadUntilBottomRef.current = false;
+      smoothScrollToBottom(true, false);
+    });
+  }, [selectedUserId, firstUnreadMessageId]);
+  
+  useEffect(() => {
+    if (!selectedUserId) return;
+  
+    if (autoScrollRef.current || !firstUnreadMessageId) {
+      smoothScrollToBottom(false, false);
+    }
+  }, [activeMessages.length, selectedUserId, firstUnreadMessageId]);
 
   useEffect(() => {
-    smoothScrollToBottom(true, false);
-  }, [selectedUserId]);
+    const baseTitle = 'LAN Chat';
+  
+    document.title =
+      totalUnreadCount > 0 ? `(${totalUnreadCount}) ${baseTitle}` : baseTitle;
+  
+    void desktopApi.setBadgeCount?.(totalUnreadCount);
+  }, [totalUnreadCount]);
 
   useEffect(() => {
     const onResize = () => updateMessageScrollbar();
@@ -2758,6 +2979,7 @@ export default function App() {
                 const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
                 const last = conv[conv.length - 1];
                 const presence = getPresence(user.id);
+                const unreadCount = unreadCountByUser[user.id] || 0;
 
                 return (
                   <button
@@ -2772,7 +2994,16 @@ export default function App() {
                     <div className="contact-text">
                       <div className="contact-head">
                         <span className="contact-name">{user.name}</span>
-                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                        <div className="contact-head-right">
+                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                          {unreadCount > 0 ? (
+                            <span className="contact-badge below-time">
+                              {unreadCount > 99 ? '99+' : unreadCount}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="contact-preview">
                         {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
@@ -2791,6 +3022,7 @@ export default function App() {
               {groupedContacts.offline.map((user) => {
                 const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
                 const last = conv[conv.length - 1];
+                const unreadCount = unreadCountByUser[user.id] || 0;
 
                 return (
                   <button
@@ -2805,7 +3037,16 @@ export default function App() {
                     <div className="contact-text">
                       <div className="contact-head">
                         <span className="contact-name">{user.name}</span>
-                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                        <div className="contact-head-right">
+                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                          {unreadCount > 0 ? (
+                            <span className="contact-badge below-time">
+                              {unreadCount > 99 ? '99+' : unreadCount}
+                            </span>
+                          ) : null}
+                        </div>
                       </div>
                       <div className="contact-preview">
                         {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
@@ -2887,11 +3128,19 @@ export default function App() {
             </header>
 
             <div className="messages-wrap">
-              <section className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
+              <section
+                className="messages"
+                ref={messagesRef}
+                onScroll={handleMessagesScroll}
+                onWheel={registerManualMessageScroll}
+                onTouchMove={registerManualMessageScroll}
+                onMouseDown={registerManualMessageScroll}
+              >
                 {activeMessages.map((m, idx) => {
                   const mine = m.fromUserId === me.id;
                   const prev = activeMessages[idx - 1];
                   const next = activeMessages[idx + 1];
+                  const showUnreadDivider = !mine && firstUnreadMessageId === m.id;
 
                   const showDivider =
                     !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
@@ -2905,6 +3154,14 @@ export default function App() {
 
                   return (
                     <div key={m.id} data-message-id={m.id}>
+                      {showUnreadDivider ? (
+                        <div className="system-chip-row">
+                          <div className="system-chip unread-chip">
+                            <span className="system-chip-text">Unread messages</span>
+                          </div>
+                        </div>
+                      ) : null}
+
                       {showDivider ? (
                         <div className="system-chip-row date-chip-row">
                           <div className="system-chip date-chip">
@@ -2976,12 +3233,12 @@ export default function App() {
 
                                     <span className="message-inline-meta-spacer" aria-hidden="true">
                                       <span className="bubble-time">{timeLabel(m.createdAt)}</span>
-                                      {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                      {mine && isMessageStatusVisible(m) ? <MessageStatus message={m} /> : null}
                                     </span>
 
                                     <span className={`message-inline-meta ${mine ? 'mine' : ''}`}>
                                       <span className="bubble-time">{timeLabel(m.createdAt)}</span>
-                                      {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                      {mine && isMessageStatusVisible(m) ? <MessageStatus message={m} /> : null}
                                     </span>
                                   </div>
                                 ) : (
@@ -3006,7 +3263,7 @@ export default function App() {
                               {!useTelegramInlineMeta ? (
                                 <div className={`bubble-meta ${mine ? 'mine' : ''}`}>
                                   <span className="bubble-time">{timeLabel(m.createdAt)}</span>
-                                  {mine && m.type !== 'deleted' ? <MessageStatus message={m} /> : null}
+                                  {mine && isMessageStatusVisible(m) ? <MessageStatus message={m} /> : null}
                                 </div>
                               ) : null}
                             </div>
@@ -3044,12 +3301,18 @@ export default function App() {
                 <button
                   className="scroll-bottom-btn"
                   onClick={() => {
+                    hasUserScrolledCurrentChatRef.current = true;
+                    suppressAutoReadUntilBottomRef.current = false;
                     autoScrollRef.current = true;
                     smoothScrollToBottom(true, true);
-
-                    if (selectedUserIdRef.current) {
-                      markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
-                    }
+                  
+                    requestAnimationFrame(() => {
+                      requestAnimationFrame(() => {
+                        if (selectedUserIdRef.current) {
+                          markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
+                        }
+                      });
+                    });
                   }}
                   aria-label="Scroll to bottom"
                   title="Scroll to bottom"

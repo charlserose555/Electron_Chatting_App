@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('desktop', {
   stopHost: () => ipcRenderer.invoke('desktop:stop-host'),
   notify: (args) => ipcRenderer.invoke('desktop:notify', args),
   onOpenFileDialog: () => ipcRenderer.invoke('desktop:open-file-dialog'),
+  setBadgeCount: (count) => ipcRenderer.invoke('app:set-badge-count', count),
 
   onNavigateToChat: (callback) => {
     const handler = (_event, payload) => callback(payload);

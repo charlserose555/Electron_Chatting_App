@@ -122,6 +122,12 @@ app.whenReady().then(async () => {
     n.show();
   });
 
+  ipcMain.handle('app:set-badge-count', async (_event, count) => {
+    if (app.setBadgeCount) {
+      app.setBadgeCount(count);
+    }
+  });
+
   ipcMain.handle('desktop:open-file-dialog', async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
