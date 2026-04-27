@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
-type User = { id: string; name: string; createdAt?: number };
+type User = {
+  id: string;
+  userId: string;
+  name: string;
+  avatarUrl?: string | null;
+  role?: 'admin' | 'user';
+  isApproved?: boolean;
+  canLogin?: boolean;
+  canAudioCall?: boolean;
+  canVideoCall?: boolean;
+  createdAt?: number;
+};
 
 type Attachment = {
   filename: string;
@@ -17,6 +28,14 @@ type ReplyTo = {
   text: string;
   attachmentName: string | null;
   isImage: boolean;
+};
+
+type ToastTone = 'info' | 'success' | 'error';
+
+type AppToast = {
+  id: number;
+  message: string;
+  tone: ToastTone;
 };
 
 type CallMode = 'audio' | 'video';
@@ -61,6 +80,13 @@ type PendingUpload = {
   isImage: boolean;
   previewUrl: string | null;
 };
+
+type LightboxState =
+  | {
+      items: Attachment[];
+      index: number;
+    }
+  | null;
 
 type CallState =
   | {
@@ -257,73 +283,350 @@ function isRenderableMessage(msg?: Message) {
   return !!msg && !['call', 'deleted', 'system'].includes(msg.type);
 }
 
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function downloadAttachment(attachment: Attachment, serverUrl: string) {
+  const href = `${serverUrl}${attachment.url}`;
+
+  try {
+    const res = await fetch(href);
+    if (!res.ok) throw new Error('Download failed');
+
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = blobUrl;
+    link.download = attachment.filename || 'download';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
+    window.setTimeout(() => {
+      URL.revokeObjectURL(blobUrl);
+    }, 1000);
+  } catch {
+    const link = document.createElement('a');
+    link.href = href;
+    link.download = attachment.filename || 'download';
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+}
+
 function AttachmentPreview({
   attachment,
-  serverUrl
+  serverUrl,
+  onOpenImage
 }: {
   attachment: Attachment;
   serverUrl: string;
+  onOpenImage: () => void;
 }) {
   const href = `${serverUrl}${attachment.url}`;
 
   if (attachment.isImage) {
     return (
-      <img
-        className="image-attachment"
-        src={href}
-        alt={attachment.filename}
-        onLoad={() => {
-          requestAnimationFrame(() => {
-            const el = document.querySelector('.messages') as HTMLElement | null;
-            if (el) {
-              el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-            }
-          });
-        }}
-      />
+      <div className="image-attachment-wrap">
+        <button
+          type="button"
+          className="media-reset-btn image-attachment-link"
+          onClick={onOpenImage}
+        >
+          <img
+            className="image-attachment"
+            src={href}
+            alt={attachment.filename}
+            onLoad={() => {
+              requestAnimationFrame(() => {
+                const el = document.querySelector('.messages') as HTMLElement | null;
+                if (el) {
+                  el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+                }
+              });
+            }}
+          />
+        </button>
+
+        <button
+          type="button"
+          className="attachment-download-btn"
+          title="Download"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void downloadAttachment(attachment, serverUrl);
+          }}
+        >
+          ⬇
+        </button>
+      </div>
     );
   }
 
   return (
-    <a className="file-attachment" href={href} target="_blank" rel="noreferrer">
-      📄 {attachment.filename}
-    </a>
+    <div className="file-attachment-card">
+      <div className="file-attachment-info">
+        <div className="file-attachment-name">📄 {attachment.filename}</div>
+        <div className="file-attachment-sub">
+          {attachment.mimeType || 'File'} · {formatFileSize(attachment.size)}
+        </div>
+      </div>
+
+      <div className="file-attachment-actions">
+        <a
+          className="file-action-btn"
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open
+        </a>
+
+        <button
+          type="button"
+          className="file-action-btn"
+          onClick={() => {
+            void downloadAttachment(attachment, serverUrl);
+          }}
+        >
+          Download
+        </button>
+      </div>
+    </div>
   );
 }
 
 function GalleryPreview({
   attachments,
-  serverUrl
+  serverUrl,
+  onOpenImage
 }: {
   attachments: Attachment[];
   serverUrl: string;
+  onOpenImage: (index: number) => void;
 }) {
-  const visible = attachments.slice(0, 4);
-  const extraCount = attachments.length - visible.length;
+  const visibleCount = attachments.length >= 5 ? 5 : attachments.length;
+  const visible = attachments.slice(0, visibleCount);
+  const extraCount = attachments.length - visibleCount;
+
+  const layoutClass =
+    visible.length >= 5
+      ? 'layout-5plus'
+      : visible.length === 4
+      ? 'layout-4'
+      : visible.length === 3
+      ? 'layout-3'
+      : 'layout-2';
 
   return (
-    <div
-      className={`gallery-attachment grid-${Math.min(visible.length, 4)}`}
-    >
+    <div className={`gallery-attachment ${layoutClass}`}>
       {visible.map((item, index) => {
-        const href = `${serverUrl}${item.url}`;
         const showOverlay = index === visible.length - 1 && extraCount > 0;
 
         return (
-          <a
+          <div
             key={`${item.url}_${index}`}
-            className="gallery-item"
-            href={href}
-            target="_blank"
-            rel="noreferrer"
+            className={`gallery-item item-${index + 1}`}
           >
-            <img src={href} alt={item.filename} className="gallery-item-image" />
-            {showOverlay ? (
-              <div className="gallery-more-overlay">+{extraCount}</div>
-            ) : null}
-          </a>
+            <button
+              type="button"
+              className="media-reset-btn gallery-item-link"
+              onClick={() => onOpenImage(index)}
+            >
+              <img
+                src={`${serverUrl}${item.url}`}
+                alt={item.filename}
+                className="gallery-item-image"
+              />
+
+              {showOverlay ? (
+                <div className="gallery-more-overlay">+{extraCount}</div>
+              ) : null}
+            </button>
+
+            <button
+              type="button"
+              className="gallery-download-btn"
+              title="Download"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                void downloadAttachment(item, serverUrl);
+              }}
+            >
+              ⬇
+            </button>
+          </div>
         );
       })}
+    </div>
+  );
+}
+
+function ImageLightbox({
+  state,
+  serverUrl,
+  onClose,
+  onPrev,
+  onNext,
+  onSelect
+}: {
+  state: LightboxState;
+  serverUrl: string;
+  onClose: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  onSelect: (index: number) => void;
+}) {
+  useEffect(() => {
+    if (!state) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      } else if (event.key === 'ArrowLeft' && state.items.length > 1) {
+        onPrev();
+      } else if (event.key === 'ArrowRight' && state.items.length > 1) {
+        onNext();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [state, onClose, onPrev, onNext]);
+
+  if (!state) return null;
+
+  const current = state.items[state.index];
+  if (!current) return null;
+
+  const hasMultiple = state.items.length > 1;
+
+  return (
+    <div className="lightbox-overlay" onClick={onClose}>
+      <div className="lightbox-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-topbar">
+          <div className="lightbox-meta">
+            <div className="lightbox-filename">{current.filename}</div>
+            <div className="lightbox-counter">
+              {state.index + 1} / {state.items.length}
+            </div>
+          </div>
+
+          <div className="lightbox-actions">
+            <button
+              type="button"
+              className="lightbox-action-btn"
+              onClick={() => void downloadAttachment(current, serverUrl)}
+              title="Download"
+            >
+              ⬇ Download
+            </button>
+            <button
+              type="button"
+              className="lightbox-action-btn"
+              onClick={onClose}
+              title="Close"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        <div className="lightbox-stage">
+          {hasMultiple ? (
+            <button
+              type="button"
+              className="lightbox-nav prev"
+              onClick={onPrev}
+              aria-label="Previous image"
+            >
+              ‹
+            </button>
+          ) : null}
+
+          <img
+            src={`${serverUrl}${current.url}`}
+            alt={current.filename}
+            className="lightbox-image"
+          />
+
+          {hasMultiple ? (
+            <button
+              type="button"
+              className="lightbox-nav next"
+              onClick={onNext}
+              aria-label="Next image"
+            >
+              ›
+            </button>
+          ) : null}
+        </div>
+
+        {hasMultiple ? (
+          <div className="lightbox-thumb-row">
+            {state.items.map((item, index) => (
+              <button
+                key={`${item.url}_${index}`}
+                type="button"
+                className={`media-reset-btn lightbox-thumb ${index === state.index ? 'active' : ''}`}
+                onClick={() => onSelect(index)}
+              >
+                <img
+                  src={`${serverUrl}${item.url}`}
+                  alt={item.filename}
+                  className="lightbox-thumb-image"
+                />
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function UserAvatar({
+  user,
+  serverUrl,
+  size = 'default'
+}: {
+  user: User;
+  serverUrl: string;
+  size?: 'default' | 'small' | 'large';
+}) {
+  const className =
+    size === 'small' ? 'avatar small' : size === 'large' ? 'avatar large' : 'avatar';
+
+  if (user.avatarUrl) {
+    return (
+      <img
+        src={`${serverUrl}${user.avatarUrl}`}
+        alt={user.name}
+        className={`${className} avatar-image`}
+      />
+    );
+  }
+
+  return (
+    <div className={className} style={{ background: avatarBg(user.id) }}>
+      {getInitials(user.name || user.userId)}
     </div>
   );
 }
@@ -333,6 +636,22 @@ const storedServer = localStorage.getItem('lan_chat_server_url') || '';
 const storedHost = localStorage.getItem('lan_chat_host_mode') === '1';
 
 export default function App() {
+  const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
+
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [loginUserId, setLoginUserId] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [authToken, setAuthToken] = useState(storedToken);
+
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [appInfo, setAppInfo] = useState<{ platform: string; appVersion: string } | null>(null);
   const [hostMode, setHostMode] = useState(storedHost);
   const [hostPort, setHostPort] = useState(4000);
@@ -389,6 +708,13 @@ export default function App() {
   const dragDepthRef = useRef(0);
   const [pendingUploads, setPendingUploads] = useState<PendingUpload[]>([]);
   const pendingUploadsRef = useRef<PendingUpload[]>([]);
+  const [lightbox, setLightbox] = useState<LightboxState>(null);  
+  const meRef = useRef<User | null>(null);
+  const localStreamPromiseRef = useRef<Promise<MediaStream> | null>(null);
+  const [toast, setToast] = useState<AppToast | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [adminSearch, setAdminSearch] = useState('');
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -402,6 +728,10 @@ export default function App() {
     onOpenFileDialog: async () => [],
     onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {}
   };
+
+  useEffect(() => {
+    meRef.current = me;
+  }, [me]);
 
   useEffect(() => {
     currentCallRef.current = callState;
@@ -436,6 +766,14 @@ export default function App() {
       pendingUploadsRef.current.forEach((item) => {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+      }
     };
   }, []);
 
@@ -593,16 +931,17 @@ export default function App() {
     setIncomingCallMode(null);
     incomingCallModeRef.current = null;
     clearPendingUploads();
+    setLightbox(null);
   }, [selectedUserId]);
 
   async function handleConnect() {
     if (hostMode && !window.desktop?.startHost) {
-      alert('Host mode is only available in the Electron desktop app.');
+      showError('Host mode is only available in the Electron desktop app.');
       return;
     }
 
     if (!username.trim()) {
-      alert('Enter a display name.');
+      showError('Enter a display name.');
       return;
     }
 
@@ -624,7 +963,7 @@ export default function App() {
     const loginData = await loginRes.json();
 
     if (!loginRes.ok) {
-      alert(loginData.error || 'Failed to log in');
+      showError(loginData.error || 'Failed to log in');      
       return;
     }
 
@@ -633,6 +972,7 @@ export default function App() {
     localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
 
     setMe(loginData.user);
+    meRef.current = loginData.user;
     setUsers(loginData.users || []);
     setConnectedServerUrl(serverUrl);
 
@@ -651,6 +991,122 @@ export default function App() {
           setSelectedUserId((curr) => curr || fallback);
         }
       );
+    });
+  }
+
+  async function handleRegister() {
+    let serverUrl = serverUrlInput.trim();
+  
+    if (hostMode) {
+      const started = await desktopApi.startHost({ port: hostPort });
+      setHostAddresses(started.addresses);
+      serverUrl = started.serverUrl;
+      setServerUrlInput(serverUrl);
+    }
+  
+    if (!loginUserId.trim()) {
+      showError('Enter user ID');
+      return;
+    }
+  
+    if (!password.trim()) {
+      showError('Enter password');
+      return;
+    }
+  
+    if (password !== confirmPassword) {
+      showError('Passwords do not match');
+      return;
+    }
+  
+    const res = await fetch(`${serverUrl}/api/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: loginUserId.trim(),
+        password
+      })
+    });
+  
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Registration failed');
+      return;
+    }
+  
+    showSuccess(data.message || 'Registered successfully');
+    setAuthMode('login');
+    setPassword('');
+    setConfirmPassword('');
+  }
+  
+  async function handleLogin() {
+    let serverUrl = serverUrlInput.trim();
+  
+    if (hostMode) {
+      const started = await desktopApi.startHost({ port: hostPort });
+      setHostAddresses(started.addresses);
+      serverUrl = started.serverUrl;
+      setServerUrlInput(serverUrl);
+    }
+  
+    const res = await fetch(`${serverUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: loginUserId.trim(),
+        password
+      })
+    });
+  
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Login failed')
+      return;
+    }
+  
+    localStorage.setItem('lan_chat_auth_token', data.token);
+    localStorage.setItem('lan_chat_server_url', serverUrl);
+    localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
+  
+    setAuthToken(data.token);
+    setConnectedServerUrl(serverUrl);
+    setMe(data.user);
+    meRef.current = data.user;
+    setUsers(data.users || []);
+    setOnlineUserIds(data.onlineUserIds || []);
+    setIdleUserIds(data.idleUserIds || []);
+    setProfileName(data.user.name || '');
+  
+    const socket = io(serverUrl, { transports: ['websocket'] });
+    socketRef.current = socket;
+  
+    socket.on('connect', () => {
+      socket.emit('auth:join', { token: data.token }, (payload: any) => {
+        if (!payload?.ok) {
+          showError(payload?.error || 'Socket login failed')
+          return;
+        }
+  
+        setUsers(payload.users || []);
+        setOnlineUserIds(payload.onlineUserIds || []);
+        setIdleUserIds(payload.idleUserIds || []);
+  
+        const fallback = payload.users.find((u: User) => u.id !== data.user.id)?.id || '';
+        setSelectedUserId((curr) => curr || fallback);
+
+        showSuccess(`Welcome, ${data.user.name || data.user.userId}!`);
+      });
+    });
+  
+    socket.on('auth:revoked', ({ reason }: { reason?: string }) => {
+      showError(reason || 'Your session was revoked by admin')
+      localStorage.removeItem('lan_chat_auth_token');
+      socket.disconnect();
+      setMe(null);
+      setAuthToken('');
     });
 
     socket.on(
@@ -733,9 +1189,9 @@ export default function App() {
         return { ...prev, [key]: next };
       });
 
-      const isNormalNotifyMessage = message.type === 'text' || message.type === 'file';
+      const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
 
-      if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
+      if (message.fromUserId !== data.user.id && isNormalNotifyMessage) {
         const senderName = usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
         const attachments = getMessageAttachments(message);
 
@@ -754,16 +1210,16 @@ export default function App() {
         });
       }
 
-      if (message.toUserId === loginData.user.id) {
+      if (message.toUserId === data.user.id) {
         socket.emit('message:delivered', {
           messageId: message.id,
-          byUserId: loginData.user.id
+          byUserId: data.user.id
         });
       
         if (canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
-            byUserId: loginData.user.id
+            byUserId: data.user.id
           });
         }
       }
@@ -822,25 +1278,33 @@ export default function App() {
     socket.on('call:accepted', async ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
       if (currentCallRef.current?.peerUserId !== fromUserId) return;
     
-      const callMode = currentCallRef.current?.mode || mode || 'video';
+      try {
+        const callMode = currentCallRef.current?.mode || mode || 'video';
     
-      setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
-      setCallStatus(
-        callMode === 'audio'
-          ? 'Creating secure local voice connection...'
-          : 'Creating secure local video connection...'
-      );
+        setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
+        setCallStatus(
+          callMode === 'audio'
+            ? 'Creating secure local voice connection...'
+            : 'Creating secure local video connection...'
+        );
     
-      const stream = await ensureLocalStream(callMode);
-      const peer = createPeer(fromUserId, stream);
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
+        const stream = await ensureLocalStream(callMode);
+        const peer = createPeer(fromUserId, stream);
+        const offer = await peer.createOffer();
+        await peer.setLocalDescription(offer);
     
-      socket.emit('signal', {
-        fromUserId: loginData.user.id,
-        toUserId: fromUserId,
-        data: { type: 'offer', payload: offer }
-      });
+        socket.emit('signal', {
+          fromUserId: data.user.id,
+          toUserId: fromUserId,
+          data: { type: 'offer', payload: offer }
+        });
+      } catch (error) {
+        const callMode = currentCallRef.current?.mode || mode || 'video';
+        const message = getCallDeviceErrorMessage(error, callMode);
+        setCallStatus(message);
+        showToast(message, 'error', 4200);
+        cleanupCall(false);
+      }
     });
 
     socket.on('call:declined', ({ fromUserId }: { fromUserId: string }) => {
@@ -879,13 +1343,13 @@ export default function App() {
             await peer.setRemoteDescription(new RTCSessionDescription(data.payload));
             const answer = await peer.createAnswer();
             await peer.setLocalDescription(answer);
-
+    
             socket.emit('signal', {
-              fromUserId: loginData.user.id,
+              fromUserId: data.user.id,
               toUserId: fromUserId,
               data: { type: 'answer', payload: answer }
             });
-
+    
             const nextCallState: CallState = {
               peerUserId: fromUserId,
               mode: callMode,
@@ -893,61 +1357,117 @@ export default function App() {
               muted: false,
               cameraOff: callMode === 'audio'
             };
-
+    
             currentCallRef.current = nextCallState;
             setCallState(nextCallState);
           }
-
+    
           if (data.type === 'answer' && peerRef.current) {
             await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.payload));
           }
-
+    
           if (data.type === 'candidate' && peerRef.current) {
             await peerRef.current.addIceCandidate(new RTCIceCandidate(data.payload));
           }
         } catch (error) {
           console.error('signal failure', error);
+          const message = 'Unable to establish the local connection.';
+          setCallStatus(message);
+          showToast(message, 'error', 4200);
+          cleanupCall(false);
         }
+      }
+    );
+  
+    // keep your other socket handlers
+  }
+
+  function getRenderableUser(userId: string): User {
+    return (
+      users.find((u) => u.id === userId) || {
+        id: userId,
+        userId,
+        name: userName(userId),
+        avatarUrl: null,
+        role: 'user',
+        canAudioCall: true,
+        canVideoCall: true
       }
     );
   }
 
+  const filteredAdminUsers = useMemo(() => {
+    const q = adminSearch.trim().toLowerCase();
+    if (!q) return adminUsers;
+  
+    return adminUsers.filter((user) => {
+      return (
+        user.name.toLowerCase().includes(q) ||
+        user.userId.toLowerCase().includes(q)
+      );
+    });
+  }, [adminUsers, adminSearch]);
+
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
-
+  
     const socket = socketRef.current;
-    if (!socket || !me) throw new Error('Socket not ready');
-
+    const currentMe = meRef.current;
+  
+    if (!socket) {
+      throw new Error('Socket not ready');
+    }
+  
+    if (!currentMe) {
+      throw new Error('Current user not ready');
+    }
+  
     const peer = new RTCPeerConnection();
-    stream.getTracks().forEach((track) => peer.addTrack(track, stream));
-
+  
+    stream.getTracks().forEach((track) => {
+      peer.addTrack(track, stream);
+    });
+  
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('signal', {
-          fromUserId: me.id,
+          fromUserId: currentMe.id,
           toUserId: remoteUserId,
           data: { type: 'candidate', payload: event.candidate }
         });
       }
     };
-
+  
     peer.ontrack = (event) => {
-      setRemoteStreamState(event.streams[0]);
+      const [remoteStream] = event.streams;
+      setRemoteStreamState(remoteStream);
     };
-
+  
     peer.onconnectionstatechange = () => {
       if (peer.connectionState === 'connected') {
         setCallState((prev) => (prev ? { ...prev, phase: 'connected' } : prev));
         setCallStatus('Connected');
       }
-
+  
       if (['failed', 'closed', 'disconnected'].includes(peer.connectionState)) {
         cleanupCall(false);
       }
     };
-
+  
     peerRef.current = peer;
     return peer;
+  }
+
+  function isImageFileType(mimeType?: string, fileName?: string) {
+    const type = String(mimeType || '').toLowerCase();
+    if (type.startsWith('image/')) return true;
+  
+    const ext = String(fileName || '')
+      .split('.')
+      .pop()
+      ?.toLowerCase();
+  
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext || '');
   }
 
   function guessMimeTypeFromName(fileName: string) {
@@ -980,7 +1500,7 @@ export default function App() {
       (input.file instanceof File ? input.file.type : '') ||
       guessMimeTypeFromName(input.fileName);
   
-    const isImage = mimeType.startsWith('image/');
+    const isImage = isImageFileType(mimeType, input.fileName);
     const previewUrl = isImage ? URL.createObjectURL(input.file) : null;
   
     return {
@@ -1019,12 +1539,10 @@ export default function App() {
   async function ensureLocalStream(mode: CallMode) {
     if (localStreamRef.current) return localStreamRef.current;
   
-    const constraints =
-      mode === 'audio'
-        ? { audio: true }
-        : { audio: true, video: true };
-  
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: mode === 'video'
+    });
   
     localStreamRef.current = stream;
     setLocalStreamState(stream);
@@ -1033,33 +1551,38 @@ export default function App() {
 
   function cleanupCall(notifyPeer: boolean) {
     const peerUserId =
-      currentCallRef.current?.peerUserId || callState?.peerUserId || incomingFromUserIdRef.current;
-
-    if (notifyPeer && peerUserId && socketRef.current && me) {
+      currentCallRef.current?.peerUserId ||
+      callState?.peerUserId ||
+      incomingFromUserIdRef.current;
+  
+    const currentMe = meRef.current;
+  
+    if (notifyPeer && peerUserId && socketRef.current && currentMe) {
       socketRef.current.emit('call:end', {
-        fromUserId: me.id,
+        fromUserId: currentMe.id,
         toUserId: peerUserId
       });
     }
-
+  
     peerRef.current?.close();
     peerRef.current = null;
-
+  
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
     }
-
+  
     localStreamRef.current = null;
+    localStreamPromiseRef.current = null;
     currentCallRef.current = null;
     incomingFromUserIdRef.current = null;
-
+  
     setLocalStreamState(null);
     setRemoteStreamState(null);
     setCallState(null);
     setIncomingFromUserId(null);
     setIncomingCallMode(null);
     incomingCallModeRef.current = null;
-
+  
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
@@ -1090,15 +1613,20 @@ export default function App() {
 
   async function loadHistory(peerUserId: string, forceScroll = false) {
     if (!connectedServerUrl || !me) return;
-
-    const res = await fetch(`${connectedServerUrl}/api/messages/${me.id}/${peerUserId}`);
+  
+    const res = await apiFetch(`/api/messages/${me.id}/${peerUserId}`);
     const data = await res.json();
-
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to load messages');
+      return;
+    }
+  
     setMessagesByConv((prev) => ({
       ...prev,
       [conversationKey(me.id, peerUserId)]: data.messages || []
     }));
-
+  
     if (forceScroll) {
       autoScrollRef.current = true;
       smoothScrollToBottom(true, false);
@@ -1152,15 +1680,22 @@ export default function App() {
         .catch(() => null);
   
       if (!blob) {
-        alert(`Unable to read the selected file: ${fileName}`);
+        showError(`Unable to read the selected file: ${fileName}`);
         return;
       }
+  
+      const mimeType = blob.type || guessMimeTypeFromName(fileName);
   
       prepared.push({
         file: blob,
         fileName,
-        mimeType: blob.type || guessMimeTypeFromName(fileName)
+        mimeType
       });
+    }
+  
+    if (!prepared.length) {
+      showError('No valid files selected.');
+      return;
     }
   
     addPendingUploads(prepared);
@@ -1188,7 +1723,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete message for you');
+          showError(result?.error || 'Failed to delete message for you')
         }
       }
     );
@@ -1205,7 +1740,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string; message?: Message }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Delete failed');
+          showError(result?.error || 'Delete failed')
           return;
         }
   
@@ -1240,8 +1775,17 @@ export default function App() {
     typingTimerRef.current = null;
   }
 
-  function startCall(mode: CallMode) {
+  async function startCall(mode: CallMode) {
     if (!socketRef.current || !me || !selectedUserId) return;
+  
+    try {
+      await ensureLocalStream(mode);
+    } catch (error) {
+      const message = getCallDeviceErrorMessage(error, mode);
+      setCallStatus(message);
+      showToast(message, 'error', 4200);
+      return;
+    }
   
     const nextCallState: CallState = {
       peerUserId: selectedUserId,
@@ -1259,10 +1803,6 @@ export default function App() {
         : `Video calling ${userName(selectedUserId)}...`
     );
   
-    ensureLocalStream(mode).catch(() =>
-      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
-    );
-  
     socketRef.current.emit('call:invite', {
       fromUserId: me.id,
       toUserId: selectedUserId,
@@ -1270,10 +1810,19 @@ export default function App() {
     });
   }
 
-  function acceptCall() {
+  async function acceptCall() {
     if (!incomingFromUserId || !socketRef.current || !me) return;
   
     const mode = incomingCallModeRef.current || 'video';
+  
+    try {
+      await ensureLocalStream(mode);
+    } catch (error) {
+      const message = getCallDeviceErrorMessage(error, mode);
+      setCallStatus(message);
+      showToast(message, 'error', 4200);
+      return;
+    }
   
     const nextCallState: CallState = {
       peerUserId: incomingFromUserId,
@@ -1286,10 +1835,6 @@ export default function App() {
     currentCallRef.current = nextCallState;
     incomingFromUserIdRef.current = null;
     setCallState(nextCallState);
-  
-    ensureLocalStream(mode).catch(() =>
-      setCallStatus(mode === 'audio' ? 'Microphone permission denied' : 'Camera/microphone permission denied')
-    );
   
     socketRef.current.emit('call:accept', {
       fromUserId: me.id,
@@ -1332,6 +1877,39 @@ export default function App() {
     setCallState((prev) => (prev ? { ...prev, cameraOff: nextOff } : prev));
   }
 
+  function dismissToast() {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setToast(null);
+  }
+  
+  function showToast(message: string, tone: ToastTone = 'info', duration = 3600) {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+  
+    setToast({
+      id: Date.now(),
+      message,
+      tone
+    });
+  
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, duration);
+  }
+
+  function showError(message: string, duration = 4200) {
+    showToast(message, 'error', duration);
+  }
+  
+  function showSuccess(message: string, duration = 3200) {
+    showToast(message, 'success', duration);
+  }
+
   function canMarkConversationAsRead(peerUserId: string) {
     return (
       !!me &&
@@ -1339,6 +1917,29 @@ export default function App() {
       autoScrollRef.current &&
       isWindowActiveRef.current
     );
+  }
+
+  async function loadAdminUsers() {
+    const res = await apiFetch('/api/admin/users');
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to load users');
+      return;
+    }
+  
+    setAdminUsers(data.users || []);
+  }
+
+  async function apiFetch(path: string, init: RequestInit = {}) {
+    const headers = new Headers(init.headers || {});
+    if (authToken) {
+      headers.set('Authorization', `Bearer ${authToken}`);
+    }
+    return fetch(`${connectedServerUrl || serverUrlInput}${path}`, {
+      ...init,
+      headers
+    });
   }
   
   function markUnreadMessagesAsRead(peerUserId: string, sourceMessages: Message[]) {
@@ -1359,6 +1960,40 @@ export default function App() {
           byUserId: me.id
         });
       });
+  }
+
+  function getCallDeviceErrorMessage(error: unknown, mode: CallMode) {
+    const err = error as DOMException | undefined;
+  
+    switch (err?.name) {
+      case 'NotFoundError':
+      case 'DevicesNotFoundError':
+        return mode === 'audio'
+          ? 'No microphone was found. Please connect a microphone and try again.'
+          : 'Camera or microphone was not found. Please connect your devices and try again.';
+  
+      case 'NotAllowedError':
+      case 'PermissionDeniedError':
+        return mode === 'audio'
+          ? 'Microphone access was denied. Please allow microphone permission and try again.'
+          : 'Camera or microphone access was denied. Please allow permission and try again.';
+  
+      case 'NotReadableError':
+      case 'TrackStartError':
+        return mode === 'audio'
+          ? 'Your microphone is being used by another app or is unavailable.'
+          : 'Your camera or microphone is being used by another app or is unavailable.';
+  
+      case 'OverconstrainedError':
+        return mode === 'audio'
+          ? 'No matching microphone device is available.'
+          : 'No matching camera or microphone device is available.';
+  
+      default:
+        return mode === 'audio'
+          ? 'Unable to start the voice call. Please check your microphone.'
+          : 'Unable to start the video call. Please check your camera and microphone.';
+    }
   }
 
   function resizeComposerTextarea(resetToOneRow = false) {
@@ -1436,6 +2071,48 @@ export default function App() {
     });
   }
 
+  function openLightbox(items: Attachment[], index = 0) {
+    if (!items.length) return;
+    setLightbox({
+      items,
+      index: Math.max(0, Math.min(index, items.length - 1))
+    });
+  }
+  
+  function closeLightbox() {
+    setLightbox(null);
+  }
+  
+  function showPrevLightbox() {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: (prev.index - 1 + prev.items.length) % prev.items.length
+      };
+    });
+  }
+  
+  function showNextLightbox() {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: (prev.index + 1) % prev.items.length
+      };
+    });
+  }
+  
+  function jumpToLightboxIndex(index: number) {
+    setLightbox((prev) => {
+      if (!prev || !prev.items.length) return prev;
+      return {
+        ...prev,
+        index: Math.max(0, Math.min(index, prev.items.length - 1))
+      };
+    });
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -1470,7 +2147,7 @@ export default function App() {
         form.append('replyToMessageId', replyTarget.id);
       }
   
-      const res = await fetch(`${connectedServerUrl}/api/upload`, {
+      const res = await apiFetch('/api/upload', {
         method: 'POST',
         body: form
       });
@@ -1478,7 +2155,7 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
   
       if (!res.ok) {
-        alert(data.error || 'Gallery upload failed');
+        showError(data.error || 'Gallery upload failed');
         return false;
       }
     } else {
@@ -1495,7 +2172,7 @@ export default function App() {
           form.append('replyToMessageId', replyTarget.id);
         }
   
-        const res = await fetch(`${connectedServerUrl}/api/upload`, {
+        const res = await apiFetch('/api/upload', {
           method: 'POST',
           body: form
         });
@@ -1503,7 +2180,7 @@ export default function App() {
         const data = await res.json().catch(() => ({}));
   
         if (!res.ok) {
-          alert(data.error || `Upload failed: ${item.fileName}`);
+          showError(data.error || `Upload failed: ${item.fileName}`);
           return false;
         }
       }
@@ -1680,7 +2357,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete chat for you');
+          showError(result?.error || 'Failed to delete chat for you');
         }
       }
     );
@@ -1697,7 +2374,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete chat for everyone');
+          showError(result?.error || 'Failed to delete chat for everyone');
         }
       }
     );
@@ -1754,6 +2431,14 @@ export default function App() {
     smoothScrollToBottom(true, false);
   }
 
+  function canUseAudioCallWith(user: User | null) {
+    return !!me && !!user && me.canAudioCall !== false && user.canAudioCall !== false;
+  }
+  
+  function canUseVideoCallWith(user: User | null) {
+    return !!me && !!user && me.canVideoCall !== false && user.canVideoCall !== false;
+  }
+
   function scrollToMessage(messageId: string) {
     const el = document.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement | null;
     if (!el) return;
@@ -1780,6 +2465,37 @@ export default function App() {
     });
   }, [users, me, search, messagesByConv]);
 
+  const groupedContacts = useMemo(() => {
+    const onlineSet = new Set(onlineUserIds);
+    const idleSet = new Set(idleUserIds);
+  
+    const getLastTime = (userId: string) => {
+      const conv = messagesByConv[conversationKey(me!.id, userId)] || [];
+      return conv.length ? conv[conv.length - 1].createdAt : 0;
+    };
+  
+    const sortByRecent = (a: User, b: User) => {
+      const diff = getLastTime(b.id) - getLastTime(a.id);
+      return diff || a.name.localeCompare(b.name);
+    };
+  
+    const online: User[] = [];
+    const offline: User[] = [];
+  
+    for (const user of visibleUsers) {
+      if (onlineSet.has(user.id) || idleSet.has(user.id)) {
+        online.push(user);
+      } else {
+        offline.push(user);
+      }
+    }
+  
+    online.sort(sortByRecent);
+    offline.sort(sortByRecent);
+  
+    return { online, offline };
+  }, [visibleUsers, onlineUserIds, idleUserIds, messagesByConv, me]);
+
   const selectedUser = users.find((u) => u.id === selectedUserId) || null;
 
   const activeMessages = useMemo(() => {
@@ -1791,7 +2507,6 @@ export default function App() {
     if (!deleteMessageTargetId) return null;
     return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
   }, [deleteMessageTargetId, activeMessages]);
-
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
   }, [activeMessages]);  
@@ -1841,58 +2556,138 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  const toastNode = toast ? (
+    <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
+      <div className="app-toast-content">
+        <span className="app-toast-icon">
+          {toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '⚠' : 'i'}
+        </span>
+        <span className="app-toast-message">{toast.message}</span>
+      </div>
+  
+      <button
+        type="button"
+        className="app-toast-close"
+        onClick={dismissToast}
+        aria-label="Dismiss notification"
+      >
+        ✕
+      </button>
+    </div>
+  ) : null;
+
   if (!me) {
     return (
-      <div className="login-shell">
-        <div className="login-card">
-          <div className="pill">Windows desktop</div>
-          <h1>LAN Chat Desktop</h1>
-          <p>One-to-one chat, file/image sending, message deletion, desktop notifications, and one-to-one video meetings over the local network.</p>
-
-          <label className="field">
-            <span>Display name</span>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Your name" />
-          </label>
-
-          <label className="checkbox-row">
-            <input type="checkbox" checked={hostMode} onChange={(e) => setHostMode(e.target.checked)} />
-            <span>Host the LAN server on this PC</span>
-          </label>
-
-          {hostMode ? (
+      <>
+        <div className="login-shell">
+          <div className="login-card auth-card">
+            <div className="pill">LAN Chat</div>
+            <h1>{authMode === 'login' ? 'Login' : 'Register'}</h1>
+            <p>
+              {authMode === 'login'
+                ? 'Sign in with your user ID and password.'
+                : 'Create a new account. New user accounts require admin approval.'}
+            </p>
+  
+            <div className="auth-tabs">
+              <button
+                className={`auth-tab ${authMode === 'login' ? 'active' : ''}`}
+                onClick={() => setAuthMode('login')}
+              >
+                Login
+              </button>
+              <button
+                className={`auth-tab ${authMode === 'register' ? 'active' : ''}`}
+                onClick={() => setAuthMode('register')}
+              >
+                Register
+              </button>
+            </div>
+  
             <label className="field">
-              <span>Host port</span>
-              <input type="number" value={hostPort} onChange={(e) => setHostPort(Number(e.target.value))} />
-            </label>
-          ) : (
-            <label className="field">
-              <span>Server URL</span>
+              <span>User ID</span>
               <input
-                value={serverUrlInput}
-                onChange={(e) => setServerUrlInput(e.target.value)}
-                placeholder="http://192.168.1.25:4000"
+                value={loginUserId}
+                onChange={(e) => setLoginUserId(e.target.value)}
+                placeholder="john.smith"
               />
             </label>
-          )}
-
-          <button className="primary" onClick={handleConnect}>
-            Enter app
-          </button>
-
-          {hostAddresses.length ? (
-            <div className="host-box">
-              <strong>Share this LAN address with other users:</strong>
-              {hostAddresses.map((item) => (
-                <div key={item}>{item}</div>
-              ))}
+  
+            <label className="field">
+              <span>Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+              />
+            </label>
+  
+            {authMode === 'register' ? (
+              <label className="field">
+                <span>Confirm password</span>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm password"
+                />
+              </label>
+            ) : null}
+  
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={hostMode}
+                onChange={(e) => setHostMode(e.target.checked)}
+              />
+              <span>Host the LAN server on this PC</span>
+            </label>
+  
+            {hostMode ? (
+              <label className="field">
+                <span>Host port</span>
+                <input
+                  type="number"
+                  value={hostPort}
+                  onChange={(e) => setHostPort(Number(e.target.value))}
+                />
+              </label>
+            ) : (
+              <label className="field">
+                <span>Server URL</span>
+                <input
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  placeholder="http://192.168.1.25:4000"
+                />
+              </label>
+            )}
+  
+            <button
+              className="primary"
+              onClick={authMode === 'login' ? handleLogin : handleRegister}
+            >
+              {authMode === 'login' ? 'Login' : 'Register'}
+            </button>
+  
+            {hostAddresses.length ? (
+              <div className="host-box">
+                <strong>Share this LAN address with other users:</strong>
+                {hostAddresses.map((item) => (
+                  <div key={item}>{item}</div>
+                ))}
+              </div>
+            ) : null}
+  
+            <div className="foot-note">
+              App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
             </div>
-          ) : null}
-
-          <div className="foot-note">
-            App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
           </div>
         </div>
-      </div>
+  
+        {toastNode}
+      </>
     );
   }
 
@@ -1901,23 +2696,45 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="profile-card">
-            <div className="avatar large">{getInitials(me.name)}</div>
+            <UserAvatar user={me} serverUrl={connectedServerUrl} />
             <div>
-              <div className="name">{me.name}</div>
-              <div className="sub">{hostMode ? 'Hosting local server' : connectedServerUrl}</div>
+              <div className="name">{me.userId}</div>
+              <div className="sub">{me.name}</div>
             </div>
           </div>
 
-          <button
-            className="icon-btn"
-            onClick={() => {
-              cleanupCall(true);
-              socketRef.current?.disconnect();
-              setMe(null);
-            }}
-          >
-            ⎋
-          </button>
+          <div className="header-actions">
+            <button className="icon-btn" onClick={() => setProfileOpen(true)} title="Profile">
+              ⚙
+            </button>
+
+            {me.role === 'admin' ? (
+              <button className="icon-btn" onClick={() => {
+                loadAdminUsers()
+                setAdminOpen(true)
+                }} title="Admin users">
+                🛡
+              </button>
+            ) : null}
+
+            <button
+              className="icon-btn"
+              onClick={async () => {
+                try {
+                  await apiFetch('/api/logout', { method: 'POST' });
+                } catch {}
+                cleanupCall(true);
+                socketRef.current?.disconnect();
+                localStorage.removeItem('lan_chat_auth_token');
+                meRef.current = null;
+                setMe(null);
+                setAuthToken('');
+              }}
+              title="Logout"
+            >
+              ⎋
+            </button>
+          </div>
         </div>
 
         <div className="search-wrap">
@@ -1933,37 +2750,72 @@ export default function App() {
         </div>
 
         <div className="contact-list">
-          {visibleUsers.map((user) => {
-            const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-            const last = conv[conv.length - 1];
-            const online = onlineUserIds.includes(user.id);
-            const presence = getPresence(user.id);
+          {groupedContacts.online.length ? (
+            <div className="contact-group">
+              <div className="contact-group-title">Online</div>
 
-            return (
-              <button
-                key={user.id}
-                className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
-                onClick={() => setSelectedUserId(user.id)}
-              >
-                <div className="contact-avatar-wrap">
-                  <div className="avatar" style={{ background: avatarBg(user.id) }}>
-                    {getInitials(user.name)}
-                  </div>
-                  {presence !== 'offline' ? (
-                    <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
-                  ) : null}
-                </div>
+              {groupedContacts.online.map((user) => {
+                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                const last = conv[conv.length - 1];
+                const presence = getPresence(user.id);
 
-                <div className="contact-text">
-                  <div className="contact-head">
-                    <span className="contact-name">{user.name}</span>
-                    <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-                  </div>
-                  <div className="contact-preview">{typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}</div>
-                </div>
-              </button>
-            );
-          })}
+                return (
+                  <button
+                    key={user.id}
+                    className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedUserId(user.id)}
+                  >
+                    <div className="contact-avatar-wrap">
+                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
+                      </div>
+                    <div className="contact-text">
+                      <div className="contact-head">
+                        <span className="contact-name">{user.name}</span>
+                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                      </div>
+                      <div className="contact-preview">
+                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {groupedContacts.offline.length ? (
+            <div className="contact-group">
+              <div className="contact-group-title offline">Offline</div>
+
+              {groupedContacts.offline.map((user) => {
+                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                const last = conv[conv.length - 1];
+
+                return (
+                  <button
+                    key={user.id}
+                    className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
+                    onClick={() => setSelectedUserId(user.id)}
+                  >
+                    <div className="contact-avatar-wrap">
+                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                    </div>
+
+                    <div className="contact-text">
+                      <div className="contact-head">
+                        <span className="contact-name">{user.name}</span>
+                        <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                      </div>
+                      <div className="contact-preview">
+                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
+                      </div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       </aside>
 
@@ -1979,9 +2831,7 @@ export default function App() {
             <header className="chat-header">
               <div className="chat-person">
                 <div className="contact-avatar-wrap">
-                  <div className="avatar" style={{ background: avatarBg(selectedUser.id) }}>
-                    {getInitials(selectedUser.name)}
-                  </div>
+                  <UserAvatar user={selectedUser} serverUrl={connectedServerUrl} />
                   {getPresence(selectedUser.id) !== 'offline' ? (
                     <span className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''}`} />
                   ) : null}
@@ -1999,10 +2849,31 @@ export default function App() {
               </div>
 
               <div className="header-actions">
-                <button className="icon-btn" onClick={() => startCall('audio')} title="Audio call">
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    if (!canUseAudioCallWith(selectedUser)) {
+                      showToast('Audio call is not allowed for this user.', 'error', 3200);
+                      return;
+                    }
+                    void startCall('audio');
+                  }}
+                  title="Audio call"
+                >
                   📞
                 </button>
-                <button className="icon-btn" onClick={() => startCall('video')} title="Video call">
+
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    if (!canUseVideoCallWith(selectedUser)) {
+                      showToast('Video call is not allowed for this user.', 'error', 3200);
+                      return;
+                    }
+                    void startCall('video');
+                  }}
+                  title="Video call"
+                >
                   🎥
                 </button>
                 <button
@@ -2034,7 +2905,13 @@ export default function App() {
 
                   return (
                     <div key={m.id} data-message-id={m.id}>
-                      {showDivider ? <div className="divider">{dateDivider(m.createdAt)}</div> : null}
+                      {showDivider ? (
+                        <div className="system-chip-row date-chip-row">
+                          <div className="system-chip date-chip">
+                            <span className="system-chip-text">{dateDivider(m.createdAt)}</span>
+                          </div>
+                        </div>
+                      ) : null}
 
                       {m.type === 'call' || m.type === 'deleted' || m.type === 'system' ? (
                         <div className="system-chip-row">
@@ -2058,9 +2935,11 @@ export default function App() {
                           {!mine ? (
                             showAvatarForThisMessage ? (
                               <div className="message-avatar">
-                                <div className="avatar small" style={{ background: avatarBg(m.fromUserId) }}>
-                                  {getInitials(userName(m.fromUserId))}
-                                </div>
+                                <UserAvatar
+                                  user={getRenderableUser(m.fromUserId)}
+                                  serverUrl={connectedServerUrl}
+                                  size="small"
+                                />
                               </div>
                             ) : (
                               <div className="message-avatar-spacer" />
@@ -2083,7 +2962,11 @@ export default function App() {
                               ) : null}
 
                               {isGallery ? (
-                                <GalleryPreview attachments={attachments} serverUrl={connectedServerUrl} />
+                                <GalleryPreview
+                                  attachments={attachments}
+                                  serverUrl={connectedServerUrl}
+                                  onOpenImage={(index) => openLightbox(attachments, index)}
+                                />
                               ) : null}
 
                               {m.text ? (
@@ -2109,7 +2992,15 @@ export default function App() {
                               ) : null}
 
                               {!isGallery && attachments.length === 1 ? (
-                                <AttachmentPreview attachment={attachments[0]} serverUrl={connectedServerUrl} />
+                                <AttachmentPreview
+                                  attachment={attachments[0]}
+                                  serverUrl={connectedServerUrl}
+                                  onOpenImage={() => {
+                                    if (attachments[0].isImage) {
+                                      openLightbox([attachments[0]], 0);
+                                    }
+                                  }}
+                                />
                               ) : null}
 
                               {!useTelegramInlineMeta ? (
@@ -2124,9 +3015,7 @@ export default function App() {
                           {mine ? (
                             showAvatarForThisMessage ? (
                               <div className="message-avatar">
-                                <div className="avatar small" style={{ background: avatarBg(me.id) }}>
-                                  {getInitials(me.name)}
-                                </div>
+                                <UserAvatar user={me} serverUrl={connectedServerUrl} size="small" />
                               </div>
                             ) : (
                               <div className="message-avatar-spacer" />
@@ -2252,11 +3141,8 @@ export default function App() {
               </div>
 
               <div className="composer-actions">
-                <button className="icon-btn small" onClick={sendAttachment}>
+                <button className="icon-btn small" onClick={sendAttachment} title="Attach file">
                   📎
-                </button>
-                <button className="icon-btn small" onClick={sendAttachment}>
-                  🖼️
                 </button>
                 <button className="send-btn" onClick={sendMessage}>
                   ➤
@@ -2350,11 +3236,12 @@ export default function App() {
       {incomingFromUserId ? (
         <div className="incoming-box tg-incoming-call">
           <div className="tg-incoming-call-top">
-            <div
-              className="tg-incoming-avatar"
-              style={{ background: avatarBg(incomingFromUserId) }}
-            >
-              {getInitials(userName(incomingFromUserId))}
+            <div className="tg-incoming-avatar-wrap">
+              <UserAvatar
+                user={getRenderableUser(incomingFromUserId)}
+                serverUrl={connectedServerUrl}
+                size="large"
+              />
             </div>
 
             <div
@@ -2382,7 +3269,7 @@ export default function App() {
             <button className="danger" onClick={declineCall}>
               Decline
             </button>
-            <button className="success" onClick={acceptCall}>
+            <button className="success" onClick={() => { void acceptCall(); }}>
               Accept
             </button>
           </div>
@@ -2461,6 +3348,367 @@ export default function App() {
             onClick={() => openDeleteMessageDialog(contextMenu.messageId)}
           >
             Delete message
+          </button>
+        </div>
+      ) : null}
+
+      {adminOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal admin-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Admin · User Access</div>
+                <div className="call-sub">Approve users and control login / call permissions</div>
+              </div>
+            </div>
+
+            <div className="admin-toolbar">
+              <input
+                className="admin-search-input"
+                value={adminSearch}
+                onChange={(e) => setAdminSearch(e.target.value)}
+                placeholder="Search by display name or user ID"
+              />
+            </div>
+
+            <div className="admin-user-list">
+              {filteredAdminUsers.map((user) => (
+                <div key={user.id} className="admin-user-row">
+                  <div className="admin-user-main">
+                    <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                    <div>
+                      <div className="contact-name">{user.name}</div>
+                      <div className="contact-preview">
+                        @{user.userId} {user.role === 'admin' ? '· Admin' : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="admin-user-perms">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.isApproved}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, isApproved: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Approved
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canLogin}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canLogin: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Login
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canAudioCall}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canAudioCall: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Audio
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canVideoCall}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canVideoCall: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Video
+                    </label>
+                  </div>
+
+                  <button
+                    className="primary"
+                    onClick={async () => {
+                      const target = adminUsers.find((u) => u.id === user.id);
+                      if (!target) return;
+
+                      const res = await apiFetch(`/api/admin/users/${user.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          isApproved: target.isApproved,
+                          canLogin: target.canLogin,
+                          canAudioCall: target.canAudioCall,
+                          canVideoCall: target.canVideoCall
+                        })
+                      });
+
+                      const data = await res.json();
+                      if (!res.ok) {
+                        showError(data.error || 'Failed to update user');
+                        return;
+                      }
+
+                      setAdminUsers((prev) =>
+                        prev.map((u) => (u.id === user.id ? { ...u, ...data.user } : u))
+                      );
+
+                      showToast('User permissions updated', 'success');
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+              ))}
+
+              {!filteredAdminUsers.length ? (
+                <div className="admin-empty">No users found.</div>
+              ) : null}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setAdminOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <ImageLightbox
+        state={lightbox}
+        serverUrl={connectedServerUrl}
+        onClose={closeLightbox}
+        onPrev={showPrevLightbox}
+        onNext={showNextLightbox}
+        onSelect={jumpToLightboxIndex}
+      />
+
+      {profileOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal settings-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Change Profile</div>
+                <div className="call-sub">Update your avatar and display name</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <div className="settings-avatar-row">
+                <UserAvatar user={me} serverUrl={connectedServerUrl} size="large" />
+                <label className="primary upload-btn">
+                  Upload avatar
+                  <input
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+
+                      const form = new FormData();
+                      form.append('avatar', file);
+
+                      const res = await apiFetch('/api/profile/avatar', {
+                        method: 'POST',
+                        body: form
+                      });
+
+                      const data = await res.json();
+                      if (!res.ok) {
+                        showError(data.error || 'Avatar upload failed');
+                        return;
+                      }
+
+                      setMe(data.user);
+                      meRef.current = data.user;
+                      setUsers((prev) =>
+                        prev.map((u) => (u.id === data.user.id ? { ...u, ...data.user } : u))
+                      );
+                      showToast('Avatar updated', 'success');
+                    }}
+                  />
+                </label>
+              </div>
+
+              <label className="field">
+                <span>User ID</span>
+                <input value={me.userId} disabled />
+              </label>
+
+              <label className="field">
+                <span>Display name</span>
+                <input value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+              </label>
+
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    const res = await apiFetch('/api/profile', {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ name: profileName })
+                    });
+
+                    const data = await res.json();
+                    if (!res.ok) {
+                      showError(data.error || 'Profile update failed');
+                      return;
+                    }
+
+                    setMe(data.user);
+                    meRef.current = data.user;
+                    setUsers((prev) =>
+                      prev.map((u) => (u.id === data.user.id ? { ...u, ...data.user } : u))
+                    );
+                    showToast('Profile updated', 'success');
+                  }}
+                >
+                  Save profile
+                </button>
+
+                <button
+                  className="icon-btn wide"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    setPasswordOpen(true);
+                  }}
+                >
+                  Change password
+                </button>
+              </div>
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setProfileOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {passwordOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal settings-modal password-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Change Password</div>
+                <div className="call-sub">Update your account password</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <label className="field">
+                <span>Current password</span>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>New password</span>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>Confirm new password</span>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                />
+              </label>
+
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    if (newPassword !== confirmNewPassword) {
+                      showError('New passwords do not match');
+                      return;
+                    }
+
+                    const res = await apiFetch('/api/profile/password', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        currentPassword,
+                        newPassword
+                      })
+                    });
+
+                    const data = await res.json();
+                    if (!res.ok) {
+                      showError(data.error || 'Password change failed');
+                      return;
+                    }
+
+                    setCurrentPassword('');
+                    setNewPassword('');
+                    setConfirmNewPassword('');
+                    showToast('Password changed', 'success');
+                    setPasswordOpen(false);
+                  }}
+                >
+                  Change password
+                </button>
+              </div>
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setPasswordOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {toast ? (
+        <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
+          <div className="app-toast-content">
+            <span className="app-toast-icon">
+              {toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '⚠' : 'i'}
+            </span>
+            <span className="app-toast-message">{toast.message}</span>
+          </div>
+
+          <button
+            type="button"
+            className="app-toast-close"
+            onClick={dismissToast}
+            aria-label="Dismiss notification"
+          >
+            ✕
           </button>
         </div>
       ) : null}
