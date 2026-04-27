@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
-type User = { id: string; name: string; createdAt?: number };
+type User = {
+  id: string;
+  userId: string;
+  name: string;
+  avatarUrl?: string | null;
+  role?: 'admin' | 'user';
+  isApproved?: boolean;
+  canLogin?: boolean;
+  canAudioCall?: boolean;
+  canVideoCall?: boolean;
+  createdAt?: number;
+};
 
 type Attachment = {
   filename: string;
@@ -113,40 +124,6 @@ function hashCode(str: string) {
   let h = 0;
   for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0;
   return h;
-}
-
-function getCallDeviceErrorMessage(error: unknown, mode: CallMode) {
-  const err = error as DOMException | undefined;
-
-  switch (err?.name) {
-    case 'NotFoundError':
-    case 'DevicesNotFoundError':
-      return mode === 'audio'
-        ? 'No microphone was found. Please connect a microphone and try again.'
-        : 'Camera or microphone was not found. Please connect your devices and try again.';
-
-    case 'NotAllowedError':
-    case 'PermissionDeniedError':
-      return mode === 'audio'
-        ? 'Microphone access was denied. Please allow microphone permission and try again.'
-        : 'Camera or microphone access was denied. Please allow permission and try again.';
-
-    case 'NotReadableError':
-    case 'TrackStartError':
-      return mode === 'audio'
-        ? 'Your microphone is being used by another app or is unavailable.'
-        : 'Your camera or microphone is being used by another app or is unavailable.';
-
-    case 'OverconstrainedError':
-      return mode === 'audio'
-        ? 'No matching microphone device is available.'
-        : 'No matching camera or microphone device is available.';
-
-    default:
-      return mode === 'audio'
-        ? 'Unable to start the voice call. Please check your microphone.'
-        : 'Unable to start the video call. Please check your camera and microphone.';
-  }
 }
 
 function avatarBg(seed: string) {
@@ -625,11 +602,56 @@ function ImageLightbox({
   );
 }
 
+function UserAvatar({
+  user,
+  serverUrl,
+  size = 'default'
+}: {
+  user: User;
+  serverUrl: string;
+  size?: 'default' | 'small' | 'large';
+}) {
+  const className =
+    size === 'small' ? 'avatar small' : size === 'large' ? 'avatar large' : 'avatar';
+
+  if (user.avatarUrl) {
+    return (
+      <img
+        src={`${serverUrl}${user.avatarUrl}`}
+        alt={user.name}
+        className={`${className} avatar-image`}
+      />
+    );
+  }
+
+  return (
+    <div className={className} style={{ background: avatarBg(user.id) }}>
+      {getInitials(user.name || user.userId)}
+    </div>
+  );
+}
+
 const storedUser = localStorage.getItem('lan_chat_user_name') || '';
 const storedServer = localStorage.getItem('lan_chat_server_url') || '';
 const storedHost = localStorage.getItem('lan_chat_host_mode') === '1';
 
 export default function App() {
+  const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
+
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [loginUserId, setLoginUserId] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [authToken, setAuthToken] = useState(storedToken);
+
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [profileName, setProfileName] = useState('');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [appInfo, setAppInfo] = useState<{ platform: string; appVersion: string } | null>(null);
   const [hostMode, setHostMode] = useState(storedHost);
   const [hostPort, setHostPort] = useState(4000);
@@ -691,6 +713,8 @@ export default function App() {
   const localStreamPromiseRef = useRef<Promise<MediaStream> | null>(null);
   const [toast, setToast] = useState<AppToast | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [adminSearch, setAdminSearch] = useState('');
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -912,12 +936,12 @@ export default function App() {
 
   async function handleConnect() {
     if (hostMode && !window.desktop?.startHost) {
-      alert('Host mode is only available in the Electron desktop app.');
+      showError('Host mode is only available in the Electron desktop app.');
       return;
     }
 
     if (!username.trim()) {
-      alert('Enter a display name.');
+      showError('Enter a display name.');
       return;
     }
 
@@ -939,7 +963,7 @@ export default function App() {
     const loginData = await loginRes.json();
 
     if (!loginRes.ok) {
-      alert(loginData.error || 'Failed to log in');
+      showError(loginData.error || 'Failed to log in');      
       return;
     }
 
@@ -967,6 +991,122 @@ export default function App() {
           setSelectedUserId((curr) => curr || fallback);
         }
       );
+    });
+  }
+
+  async function handleRegister() {
+    let serverUrl = serverUrlInput.trim();
+  
+    if (hostMode) {
+      const started = await desktopApi.startHost({ port: hostPort });
+      setHostAddresses(started.addresses);
+      serverUrl = started.serverUrl;
+      setServerUrlInput(serverUrl);
+    }
+  
+    if (!loginUserId.trim()) {
+      showError('Enter user ID');
+      return;
+    }
+  
+    if (!password.trim()) {
+      showError('Enter password');
+      return;
+    }
+  
+    if (password !== confirmPassword) {
+      showError('Passwords do not match');
+      return;
+    }
+  
+    const res = await fetch(`${serverUrl}/api/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: loginUserId.trim(),
+        password
+      })
+    });
+  
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Registration failed');
+      return;
+    }
+  
+    showSuccess(data.message || 'Registered successfully');
+    setAuthMode('login');
+    setPassword('');
+    setConfirmPassword('');
+  }
+  
+  async function handleLogin() {
+    let serverUrl = serverUrlInput.trim();
+  
+    if (hostMode) {
+      const started = await desktopApi.startHost({ port: hostPort });
+      setHostAddresses(started.addresses);
+      serverUrl = started.serverUrl;
+      setServerUrlInput(serverUrl);
+    }
+  
+    const res = await fetch(`${serverUrl}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: loginUserId.trim(),
+        password
+      })
+    });
+  
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Login failed')
+      return;
+    }
+  
+    localStorage.setItem('lan_chat_auth_token', data.token);
+    localStorage.setItem('lan_chat_server_url', serverUrl);
+    localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
+  
+    setAuthToken(data.token);
+    setConnectedServerUrl(serverUrl);
+    setMe(data.user);
+    meRef.current = data.user;
+    setUsers(data.users || []);
+    setOnlineUserIds(data.onlineUserIds || []);
+    setIdleUserIds(data.idleUserIds || []);
+    setProfileName(data.user.name || '');
+  
+    const socket = io(serverUrl, { transports: ['websocket'] });
+    socketRef.current = socket;
+  
+    socket.on('connect', () => {
+      socket.emit('auth:join', { token: data.token }, (payload: any) => {
+        if (!payload?.ok) {
+          showError(payload?.error || 'Socket login failed')
+          return;
+        }
+  
+        setUsers(payload.users || []);
+        setOnlineUserIds(payload.onlineUserIds || []);
+        setIdleUserIds(payload.idleUserIds || []);
+  
+        const fallback = payload.users.find((u: User) => u.id !== data.user.id)?.id || '';
+        setSelectedUserId((curr) => curr || fallback);
+
+        showSuccess(`Welcome, ${data.user.name || data.user.userId}!`);
+      });
+    });
+  
+    socket.on('auth:revoked', ({ reason }: { reason?: string }) => {
+      showError(reason || 'Your session was revoked by admin')
+      localStorage.removeItem('lan_chat_auth_token');
+      socket.disconnect();
+      setMe(null);
+      setAuthToken('');
     });
 
     socket.on(
@@ -1051,7 +1191,7 @@ export default function App() {
 
       const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
 
-      if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
+      if (message.fromUserId !== data.user.id && isNormalNotifyMessage) {
         const senderName = usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
         const attachments = getMessageAttachments(message);
 
@@ -1070,16 +1210,16 @@ export default function App() {
         });
       }
 
-      if (message.toUserId === loginData.user.id) {
+      if (message.toUserId === data.user.id) {
         socket.emit('message:delivered', {
           messageId: message.id,
-          byUserId: loginData.user.id
+          byUserId: data.user.id
         });
       
         if (canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
-            byUserId: loginData.user.id
+            byUserId: data.user.id
           });
         }
       }
@@ -1154,7 +1294,7 @@ export default function App() {
         await peer.setLocalDescription(offer);
     
         socket.emit('signal', {
-          fromUserId: loginData.user.id,
+          fromUserId: data.user.id,
           toUserId: fromUserId,
           data: { type: 'offer', payload: offer }
         });
@@ -1205,7 +1345,7 @@ export default function App() {
             await peer.setLocalDescription(answer);
     
             socket.emit('signal', {
-              fromUserId: loginData.user.id,
+              fromUserId: data.user.id,
               toUserId: fromUserId,
               data: { type: 'answer', payload: answer }
             });
@@ -1238,7 +1378,35 @@ export default function App() {
         }
       }
     );
+  
+    // keep your other socket handlers
   }
+
+  function getRenderableUser(userId: string): User {
+    return (
+      users.find((u) => u.id === userId) || {
+        id: userId,
+        userId,
+        name: userName(userId),
+        avatarUrl: null,
+        role: 'user',
+        canAudioCall: true,
+        canVideoCall: true
+      }
+    );
+  }
+
+  const filteredAdminUsers = useMemo(() => {
+    const q = adminSearch.trim().toLowerCase();
+    if (!q) return adminUsers;
+  
+    return adminUsers.filter((user) => {
+      return (
+        user.name.toLowerCase().includes(q) ||
+        user.userId.toLowerCase().includes(q)
+      );
+    });
+  }, [adminUsers, adminSearch]);
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
@@ -1290,6 +1458,18 @@ export default function App() {
     return peer;
   }
 
+  function isImageFileType(mimeType?: string, fileName?: string) {
+    const type = String(mimeType || '').toLowerCase();
+    if (type.startsWith('image/')) return true;
+  
+    const ext = String(fileName || '')
+      .split('.')
+      .pop()
+      ?.toLowerCase();
+  
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg'].includes(ext || '');
+  }
+
   function guessMimeTypeFromName(fileName: string) {
     const ext = fileName.split('.').pop()?.toLowerCase() || '';
   
@@ -1320,7 +1500,7 @@ export default function App() {
       (input.file instanceof File ? input.file.type : '') ||
       guessMimeTypeFromName(input.fileName);
   
-    const isImage = mimeType.startsWith('image/');
+    const isImage = isImageFileType(mimeType, input.fileName);
     const previewUrl = isImage ? URL.createObjectURL(input.file) : null;
   
     return {
@@ -1433,15 +1613,20 @@ export default function App() {
 
   async function loadHistory(peerUserId: string, forceScroll = false) {
     if (!connectedServerUrl || !me) return;
-
-    const res = await fetch(`${connectedServerUrl}/api/messages/${me.id}/${peerUserId}`);
+  
+    const res = await apiFetch(`/api/messages/${me.id}/${peerUserId}`);
     const data = await res.json();
-
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to load messages');
+      return;
+    }
+  
     setMessagesByConv((prev) => ({
       ...prev,
       [conversationKey(me.id, peerUserId)]: data.messages || []
     }));
-
+  
     if (forceScroll) {
       autoScrollRef.current = true;
       smoothScrollToBottom(true, false);
@@ -1495,15 +1680,22 @@ export default function App() {
         .catch(() => null);
   
       if (!blob) {
-        alert(`Unable to read the selected file: ${fileName}`);
+        showError(`Unable to read the selected file: ${fileName}`);
         return;
       }
+  
+      const mimeType = blob.type || guessMimeTypeFromName(fileName);
   
       prepared.push({
         file: blob,
         fileName,
-        mimeType: blob.type || guessMimeTypeFromName(fileName)
+        mimeType
       });
+    }
+  
+    if (!prepared.length) {
+      showError('No valid files selected.');
+      return;
     }
   
     addPendingUploads(prepared);
@@ -1531,7 +1723,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete message for you');
+          showError(result?.error || 'Failed to delete message for you')
         }
       }
     );
@@ -1548,7 +1740,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string; message?: Message }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Delete failed');
+          showError(result?.error || 'Delete failed')
           return;
         }
   
@@ -1710,6 +1902,14 @@ export default function App() {
     }, duration);
   }
 
+  function showError(message: string, duration = 4200) {
+    showToast(message, 'error', duration);
+  }
+  
+  function showSuccess(message: string, duration = 3200) {
+    showToast(message, 'success', duration);
+  }
+
   function canMarkConversationAsRead(peerUserId: string) {
     return (
       !!me &&
@@ -1717,6 +1917,29 @@ export default function App() {
       autoScrollRef.current &&
       isWindowActiveRef.current
     );
+  }
+
+  async function loadAdminUsers() {
+    const res = await apiFetch('/api/admin/users');
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to load users');
+      return;
+    }
+  
+    setAdminUsers(data.users || []);
+  }
+
+  async function apiFetch(path: string, init: RequestInit = {}) {
+    const headers = new Headers(init.headers || {});
+    if (authToken) {
+      headers.set('Authorization', `Bearer ${authToken}`);
+    }
+    return fetch(`${connectedServerUrl || serverUrlInput}${path}`, {
+      ...init,
+      headers
+    });
   }
   
   function markUnreadMessagesAsRead(peerUserId: string, sourceMessages: Message[]) {
@@ -1924,7 +2147,7 @@ export default function App() {
         form.append('replyToMessageId', replyTarget.id);
       }
   
-      const res = await fetch(`${connectedServerUrl}/api/upload`, {
+      const res = await apiFetch('/api/upload', {
         method: 'POST',
         body: form
       });
@@ -1932,7 +2155,7 @@ export default function App() {
       const data = await res.json().catch(() => ({}));
   
       if (!res.ok) {
-        alert(data.error || 'Gallery upload failed');
+        showError(data.error || 'Gallery upload failed');
         return false;
       }
     } else {
@@ -1949,7 +2172,7 @@ export default function App() {
           form.append('replyToMessageId', replyTarget.id);
         }
   
-        const res = await fetch(`${connectedServerUrl}/api/upload`, {
+        const res = await apiFetch('/api/upload', {
           method: 'POST',
           body: form
         });
@@ -1957,7 +2180,7 @@ export default function App() {
         const data = await res.json().catch(() => ({}));
   
         if (!res.ok) {
-          alert(data.error || `Upload failed: ${item.fileName}`);
+          showError(data.error || `Upload failed: ${item.fileName}`);
           return false;
         }
       }
@@ -2134,7 +2357,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete chat for you');
+          showError(result?.error || 'Failed to delete chat for you');
         }
       }
     );
@@ -2151,7 +2374,7 @@ export default function App() {
       },
       (result: { ok: boolean; error?: string }) => {
         if (!result?.ok) {
-          alert(result?.error || 'Failed to delete chat for everyone');
+          showError(result?.error || 'Failed to delete chat for everyone');
         }
       }
     );
@@ -2206,6 +2429,14 @@ export default function App() {
   
     focusComposer();
     smoothScrollToBottom(true, false);
+  }
+
+  function canUseAudioCallWith(user: User | null) {
+    return !!me && !!user && me.canAudioCall !== false && user.canAudioCall !== false;
+  }
+  
+  function canUseVideoCallWith(user: User | null) {
+    return !!me && !!user && me.canVideoCall !== false && user.canVideoCall !== false;
   }
 
   function scrollToMessage(messageId: string) {
@@ -2325,58 +2556,138 @@ export default function App() {
     return () => window.removeEventListener('resize', onResize);
   }, []);
 
+  const toastNode = toast ? (
+    <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
+      <div className="app-toast-content">
+        <span className="app-toast-icon">
+          {toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '⚠' : 'i'}
+        </span>
+        <span className="app-toast-message">{toast.message}</span>
+      </div>
+  
+      <button
+        type="button"
+        className="app-toast-close"
+        onClick={dismissToast}
+        aria-label="Dismiss notification"
+      >
+        ✕
+      </button>
+    </div>
+  ) : null;
+
   if (!me) {
     return (
-      <div className="login-shell">
-        <div className="login-card">
-          <div className="pill">Windows desktop</div>
-          <h1>LAN Chat Desktop</h1>
-          <p>One-to-one chat, file/image sending, message deletion, desktop notifications, and one-to-one video meetings over the local network.</p>
-
-          <label className="field">
-            <span>Display name</span>
-            <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Your name" />
-          </label>
-
-          <label className="checkbox-row">
-            <input type="checkbox" checked={hostMode} onChange={(e) => setHostMode(e.target.checked)} />
-            <span>Host the LAN server on this PC</span>
-          </label>
-
-          {hostMode ? (
+      <>
+        <div className="login-shell">
+          <div className="login-card auth-card">
+            <div className="pill">LAN Chat</div>
+            <h1>{authMode === 'login' ? 'Login' : 'Register'}</h1>
+            <p>
+              {authMode === 'login'
+                ? 'Sign in with your user ID and password.'
+                : 'Create a new account. New user accounts require admin approval.'}
+            </p>
+  
+            <div className="auth-tabs">
+              <button
+                className={`auth-tab ${authMode === 'login' ? 'active' : ''}`}
+                onClick={() => setAuthMode('login')}
+              >
+                Login
+              </button>
+              <button
+                className={`auth-tab ${authMode === 'register' ? 'active' : ''}`}
+                onClick={() => setAuthMode('register')}
+              >
+                Register
+              </button>
+            </div>
+  
             <label className="field">
-              <span>Host port</span>
-              <input type="number" value={hostPort} onChange={(e) => setHostPort(Number(e.target.value))} />
-            </label>
-          ) : (
-            <label className="field">
-              <span>Server URL</span>
+              <span>User ID</span>
               <input
-                value={serverUrlInput}
-                onChange={(e) => setServerUrlInput(e.target.value)}
-                placeholder="http://192.168.1.25:4000"
+                value={loginUserId}
+                onChange={(e) => setLoginUserId(e.target.value)}
+                placeholder="john.smith"
               />
             </label>
-          )}
-
-          <button className="primary" onClick={handleConnect}>
-            Enter app
-          </button>
-
-          {hostAddresses.length ? (
-            <div className="host-box">
-              <strong>Share this LAN address with other users:</strong>
-              {hostAddresses.map((item) => (
-                <div key={item}>{item}</div>
-              ))}
+  
+            <label className="field">
+              <span>Password</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Password"
+              />
+            </label>
+  
+            {authMode === 'register' ? (
+              <label className="field">
+                <span>Confirm password</span>
+                <input
+                  type="password"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm password"
+                />
+              </label>
+            ) : null}
+  
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={hostMode}
+                onChange={(e) => setHostMode(e.target.checked)}
+              />
+              <span>Host the LAN server on this PC</span>
+            </label>
+  
+            {hostMode ? (
+              <label className="field">
+                <span>Host port</span>
+                <input
+                  type="number"
+                  value={hostPort}
+                  onChange={(e) => setHostPort(Number(e.target.value))}
+                />
+              </label>
+            ) : (
+              <label className="field">
+                <span>Server URL</span>
+                <input
+                  value={serverUrlInput}
+                  onChange={(e) => setServerUrlInput(e.target.value)}
+                  placeholder="http://192.168.1.25:4000"
+                />
+              </label>
+            )}
+  
+            <button
+              className="primary"
+              onClick={authMode === 'login' ? handleLogin : handleRegister}
+            >
+              {authMode === 'login' ? 'Login' : 'Register'}
+            </button>
+  
+            {hostAddresses.length ? (
+              <div className="host-box">
+                <strong>Share this LAN address with other users:</strong>
+                {hostAddresses.map((item) => (
+                  <div key={item}>{item}</div>
+                ))}
+              </div>
+            ) : null}
+  
+            <div className="foot-note">
+              App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
             </div>
-          ) : null}
-
-          <div className="foot-note">
-            App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
           </div>
         </div>
-      </div>
+  
+        {toastNode}
+      </>
     );
   }
 
@@ -2385,24 +2696,45 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="profile-card">
-            <div className="avatar large">{getInitials(me.name)}</div>
+            <UserAvatar user={me} serverUrl={connectedServerUrl} />
             <div>
-              <div className="name">{me.name}</div>
-              <div className="sub">{hostMode ? 'Hosting local server' : connectedServerUrl}</div>
+              <div className="name">{me.userId}</div>
+              <div className="sub">{me.name}</div>
             </div>
           </div>
 
-          <button
-            className="icon-btn"
-            onClick={() => {
-              cleanupCall(true);
-              socketRef.current?.disconnect();
-              meRef.current = null;
-              setMe(null);
-            }}
-          >
-            ⎋
-          </button>
+          <div className="header-actions">
+            <button className="icon-btn" onClick={() => setProfileOpen(true)} title="Profile">
+              ⚙
+            </button>
+
+            {me.role === 'admin' ? (
+              <button className="icon-btn" onClick={() => {
+                loadAdminUsers()
+                setAdminOpen(true)
+                }} title="Admin users">
+                🛡
+              </button>
+            ) : null}
+
+            <button
+              className="icon-btn"
+              onClick={async () => {
+                try {
+                  await apiFetch('/api/logout', { method: 'POST' });
+                } catch {}
+                cleanupCall(true);
+                socketRef.current?.disconnect();
+                localStorage.removeItem('lan_chat_auth_token');
+                meRef.current = null;
+                setMe(null);
+                setAuthToken('');
+              }}
+              title="Logout"
+            >
+              ⎋
+            </button>
+          </div>
         </div>
 
         <div className="search-wrap">
@@ -2434,12 +2766,9 @@ export default function App() {
                     onClick={() => setSelectedUserId(user.id)}
                   >
                     <div className="contact-avatar-wrap">
-                      <div className="avatar" style={{ background: avatarBg(user.id) }}>
-                        {getInitials(user.name)}
+                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
                       </div>
-                      <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
-                    </div>
-
                     <div className="contact-text">
                       <div className="contact-head">
                         <span className="contact-name">{user.name}</span>
@@ -2470,9 +2799,7 @@ export default function App() {
                     onClick={() => setSelectedUserId(user.id)}
                   >
                     <div className="contact-avatar-wrap">
-                      <div className="avatar" style={{ background: avatarBg(user.id) }}>
-                        {getInitials(user.name)}
-                      </div>
+                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
                     </div>
 
                     <div className="contact-text">
@@ -2504,9 +2831,7 @@ export default function App() {
             <header className="chat-header">
               <div className="chat-person">
                 <div className="contact-avatar-wrap">
-                  <div className="avatar" style={{ background: avatarBg(selectedUser.id) }}>
-                    {getInitials(selectedUser.name)}
-                  </div>
+                  <UserAvatar user={selectedUser} serverUrl={connectedServerUrl} />
                   {getPresence(selectedUser.id) !== 'offline' ? (
                     <span className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''}`} />
                   ) : null}
@@ -2524,11 +2849,31 @@ export default function App() {
               </div>
 
               <div className="header-actions">
-                <button className="icon-btn" onClick={() => { void startCall('audio'); }} title="Audio call">
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    if (!canUseAudioCallWith(selectedUser)) {
+                      showToast('Audio call is not allowed for this user.', 'error', 3200);
+                      return;
+                    }
+                    void startCall('audio');
+                  }}
+                  title="Audio call"
+                >
                   📞
                 </button>
 
-                <button className="icon-btn" onClick={() => { void startCall('video'); }} title="Video call">
+                <button
+                  className="icon-btn"
+                  onClick={() => {
+                    if (!canUseVideoCallWith(selectedUser)) {
+                      showToast('Video call is not allowed for this user.', 'error', 3200);
+                      return;
+                    }
+                    void startCall('video');
+                  }}
+                  title="Video call"
+                >
                   🎥
                 </button>
                 <button
@@ -2590,9 +2935,11 @@ export default function App() {
                           {!mine ? (
                             showAvatarForThisMessage ? (
                               <div className="message-avatar">
-                                <div className="avatar small" style={{ background: avatarBg(m.fromUserId) }}>
-                                  {getInitials(userName(m.fromUserId))}
-                                </div>
+                                <UserAvatar
+                                  user={getRenderableUser(m.fromUserId)}
+                                  serverUrl={connectedServerUrl}
+                                  size="small"
+                                />
                               </div>
                             ) : (
                               <div className="message-avatar-spacer" />
@@ -2668,9 +3015,7 @@ export default function App() {
                           {mine ? (
                             showAvatarForThisMessage ? (
                               <div className="message-avatar">
-                                <div className="avatar small" style={{ background: avatarBg(me.id) }}>
-                                  {getInitials(me.name)}
-                                </div>
+                                <UserAvatar user={me} serverUrl={connectedServerUrl} size="small" />
                               </div>
                             ) : (
                               <div className="message-avatar-spacer" />
@@ -2796,11 +3141,8 @@ export default function App() {
               </div>
 
               <div className="composer-actions">
-                <button className="icon-btn small" onClick={sendAttachment}>
+                <button className="icon-btn small" onClick={sendAttachment} title="Attach file">
                   📎
-                </button>
-                <button className="icon-btn small" onClick={sendAttachment}>
-                  🖼️
                 </button>
                 <button className="send-btn" onClick={sendMessage}>
                   ➤
@@ -2894,11 +3236,12 @@ export default function App() {
       {incomingFromUserId ? (
         <div className="incoming-box tg-incoming-call">
           <div className="tg-incoming-call-top">
-            <div
-              className="tg-incoming-avatar"
-              style={{ background: avatarBg(incomingFromUserId) }}
-            >
-              {getInitials(userName(incomingFromUserId))}
+            <div className="tg-incoming-avatar-wrap">
+              <UserAvatar
+                user={getRenderableUser(incomingFromUserId)}
+                serverUrl={connectedServerUrl}
+                size="large"
+              />
             </div>
 
             <div
@@ -3009,6 +3352,149 @@ export default function App() {
         </div>
       ) : null}
 
+      {adminOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal admin-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Admin · User Access</div>
+                <div className="call-sub">Approve users and control login / call permissions</div>
+              </div>
+            </div>
+
+            <div className="admin-toolbar">
+              <input
+                className="admin-search-input"
+                value={adminSearch}
+                onChange={(e) => setAdminSearch(e.target.value)}
+                placeholder="Search by display name or user ID"
+              />
+            </div>
+
+            <div className="admin-user-list">
+              {filteredAdminUsers.map((user) => (
+                <div key={user.id} className="admin-user-row">
+                  <div className="admin-user-main">
+                    <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                    <div>
+                      <div className="contact-name">{user.name}</div>
+                      <div className="contact-preview">
+                        @{user.userId} {user.role === 'admin' ? '· Admin' : ''}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="admin-user-perms">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.isApproved}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, isApproved: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Approved
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canLogin}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canLogin: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Login
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canAudioCall}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canAudioCall: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Audio
+                    </label>
+
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={!!user.canVideoCall}
+                        onChange={(e) => {
+                          setAdminUsers((prev) =>
+                            prev.map((u) =>
+                              u.id === user.id ? { ...u, canVideoCall: e.target.checked } : u
+                            )
+                          );
+                        }}
+                      />{' '}
+                      Video
+                    </label>
+                  </div>
+
+                  <button
+                    className="primary"
+                    onClick={async () => {
+                      const target = adminUsers.find((u) => u.id === user.id);
+                      if (!target) return;
+
+                      const res = await apiFetch(`/api/admin/users/${user.id}`, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          isApproved: target.isApproved,
+                          canLogin: target.canLogin,
+                          canAudioCall: target.canAudioCall,
+                          canVideoCall: target.canVideoCall
+                        })
+                      });
+
+                      const data = await res.json();
+                      if (!res.ok) {
+                        showError(data.error || 'Failed to update user');
+                        return;
+                      }
+
+                      setAdminUsers((prev) =>
+                        prev.map((u) => (u.id === user.id ? { ...u, ...data.user } : u))
+                      );
+
+                      showToast('User permissions updated', 'success');
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+              ))}
+
+              {!filteredAdminUsers.length ? (
+                <div className="admin-empty">No users found.</div>
+              ) : null}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setAdminOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <ImageLightbox
         state={lightbox}
         serverUrl={connectedServerUrl}
@@ -3017,6 +3503,195 @@ export default function App() {
         onNext={showNextLightbox}
         onSelect={jumpToLightboxIndex}
       />
+
+      {profileOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal settings-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Change Profile</div>
+                <div className="call-sub">Update your avatar and display name</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <div className="settings-avatar-row">
+                <UserAvatar user={me} serverUrl={connectedServerUrl} size="large" />
+                <label className="primary upload-btn">
+                  Upload avatar
+                  <input
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+
+                      const form = new FormData();
+                      form.append('avatar', file);
+
+                      const res = await apiFetch('/api/profile/avatar', {
+                        method: 'POST',
+                        body: form
+                      });
+
+                      const data = await res.json();
+                      if (!res.ok) {
+                        showError(data.error || 'Avatar upload failed');
+                        return;
+                      }
+
+                      setMe(data.user);
+                      meRef.current = data.user;
+                      setUsers((prev) =>
+                        prev.map((u) => (u.id === data.user.id ? { ...u, ...data.user } : u))
+                      );
+                      showToast('Avatar updated', 'success');
+                    }}
+                  />
+                </label>
+              </div>
+
+              <label className="field">
+                <span>User ID</span>
+                <input value={me.userId} disabled />
+              </label>
+
+              <label className="field">
+                <span>Display name</span>
+                <input value={profileName} onChange={(e) => setProfileName(e.target.value)} />
+              </label>
+
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    const res = await apiFetch('/api/profile', {
+                      method: 'PATCH',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ name: profileName })
+                    });
+
+                    const data = await res.json();
+                    if (!res.ok) {
+                      showError(data.error || 'Profile update failed');
+                      return;
+                    }
+
+                    setMe(data.user);
+                    meRef.current = data.user;
+                    setUsers((prev) =>
+                      prev.map((u) => (u.id === data.user.id ? { ...u, ...data.user } : u))
+                    );
+                    showToast('Profile updated', 'success');
+                  }}
+                >
+                  Save profile
+                </button>
+
+                <button
+                  className="icon-btn wide"
+                  onClick={() => {
+                    setProfileOpen(false);
+                    setPasswordOpen(true);
+                  }}
+                >
+                  Change password
+                </button>
+              </div>
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setProfileOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {passwordOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal settings-modal password-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Change Password</div>
+                <div className="call-sub">Update your account password</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <label className="field">
+                <span>Current password</span>
+                <input
+                  type="password"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>New password</span>
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>Confirm new password</span>
+                <input
+                  type="password"
+                  value={confirmNewPassword}
+                  onChange={(e) => setConfirmNewPassword(e.target.value)}
+                />
+              </label>
+
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    if (newPassword !== confirmNewPassword) {
+                      showError('New passwords do not match');
+                      return;
+                    }
+
+                    const res = await apiFetch('/api/profile/password', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        currentPassword,
+                        newPassword
+                      })
+                    });
+
+                    const data = await res.json();
+                    if (!res.ok) {
+                      showError(data.error || 'Password change failed');
+                      return;
+                    }
+
+                    setCurrentPassword('');
+                    setNewPassword('');
+                    setConfirmNewPassword('');
+                    showToast('Password changed', 'success');
+                    setPasswordOpen(false);
+                  }}
+                >
+                  Change password
+                </button>
+              </div>
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setPasswordOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">

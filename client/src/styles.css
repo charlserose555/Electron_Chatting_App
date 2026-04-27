@@ -803,7 +803,7 @@ button {
   width: auto;
   padding: 0 18px;
   height: 46px;
-  margin-top: 16px;
+  margin-top: 0;
 }
 
 .host-box {
@@ -2000,4 +2000,282 @@ button {
 .contact-card.offline:hover,
 .contact-card.offline.selected {
   opacity: 1;
+}
+
+.auth-card {
+  width: min(520px, 100%);
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 18px;
+  margin-bottom: 8px;
+}
+
+.auth-tab {
+  height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
+}
+
+.auth-tab.active {
+  color: #fff;
+  background: rgba(74, 103, 255, 0.18);
+  border-color: rgba(74, 103, 255, 0.32);
+}
+
+.avatar-image {
+  object-fit: cover;
+  display: block;
+}
+
+.settings-modal {
+  width: min(560px, calc(100% - 32px));
+}
+
+.settings-body {
+  display: grid;
+  gap: 14px;
+}
+
+.settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 4px;
+}
+
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: 0 16px;
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--line);
+  margin: 8px 0;
+}
+
+.admin-modal {
+  width: min(900px, calc(100% - 32px));
+}
+
+.admin-user-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-user-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.4fr auto;
+  gap: 16px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.admin-user-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-user-perms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.admin-user-perms label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+@media (max-width: 900px) {
+  .admin-user-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.avatar-image {
+  object-fit: cover;
+  overflow: hidden;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.tg-incoming-avatar-wrap {
+  width: 56px;
+  height: 56px;
+  flex: 0 0 auto;
+}
+
+.settings-modal {
+  width: min(560px, calc(100% - 32px));
+}
+
+.password-modal {
+  width: min(460px, calc(100% - 32px));
+}
+
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.settings-body::-webkit-scrollbar,
+.admin-user-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-body::-webkit-scrollbar-thumb,
+.admin-user-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+.settings-body::-webkit-scrollbar-track,
+.admin-user-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.admin-modal {
+  width: min(920px, calc(100% - 32px));
+}
+
+.admin-toolbar {
+  margin-bottom: 14px;
+}
+
+.admin-search-input {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 14px;
+  outline: none;
+}
+
+.admin-user-list {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-user-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(260px, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.admin-user-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.admin-user-perms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--text);
+}
+
+.admin-user-perms label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.admin-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .admin-user-row {
+    grid-template-columns: 1fr;
+    align-items: flex-start;
+  }
+}
+
+/* keep profile action buttons on one row */
+.settings-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-actions .primary,
+.settings-actions .icon-btn.wide,
+.settings-actions .danger.wide,
+.settings-actions .success {
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+
+/* add spacing above modal/call action buttons */
+.call-actions {
+  margin-top: 18px;
+}
+
+/* optional: a little more breathing room in the live call modal */
+.call-modal .call-actions {
+  padding-top: 4px;
+}
+
+.login-card .primary,
+.auth-card .primary,
+.field + .primary,
+.checkbox-row + .primary {
+  margin-top: 16px;
 }
