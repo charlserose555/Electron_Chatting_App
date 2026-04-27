@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
+const FIXED_SERVER_URL = 'http://172.16.67.6:4000';
+
 type User = {
   id: string;
   userId: string;
@@ -631,10 +633,6 @@ function UserAvatar({
   );
 }
 
-const storedUser = localStorage.getItem('lan_chat_user_name') || '';
-const storedServer = localStorage.getItem('lan_chat_server_url') || '';
-const storedHost = localStorage.getItem('lan_chat_host_mode') === '1';
-
 export default function App() {
   const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
 
@@ -653,12 +651,8 @@ export default function App() {
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminUsers, setAdminUsers] = useState<User[]>([]);
   const [appInfo, setAppInfo] = useState<{ platform: string; appVersion: string } | null>(null);
-  const [hostMode, setHostMode] = useState(storedHost);
-  const [hostPort, setHostPort] = useState(4000);
-  const [hostAddresses, setHostAddresses] = useState<string[]>([]);
-  const [serverUrlInput, setServerUrlInput] = useState(storedServer || 'http://127.0.0.1:4000');
-  const [connectedServerUrl, setConnectedServerUrl] = useState('');
-  const [username, setUsername] = useState(storedUser);
+
+  const [connectedServerUrl, setConnectedServerUrl] = useState(FIXED_SERVER_URL);
   const [me, setMe] = useState<User | null>(null);
   const [users, setUsers] = useState<User[]>([]);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
@@ -725,9 +719,6 @@ export default function App() {
       platform: 'web',
       appVersion: 'browser'
     }),
-    startHost: async (_opts: { port: number }) => {
-      throw new Error('Host mode is only available in Electron desktop');
-    },
     notify: async (_opts: { title: string; body: string; userId?: string; kind?: 'message' | 'call' }) => {},
     onOpenFileDialog: async () => [],
     onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {},
@@ -953,82 +944,7 @@ export default function App() {
     hasUserScrolledCurrentChatRef.current = false;
   }, [selectedUserId]);
 
-  async function handleConnect() {
-    if (hostMode && !window.desktop?.startHost) {
-      showError('Host mode is only available in the Electron desktop app.');
-      return;
-    }
-
-    if (!username.trim()) {
-      showError('Enter a display name.');
-      return;
-    }
-
-    let serverUrl = serverUrlInput.trim();
-
-    if (hostMode) {
-      const started = await desktopApi.startHost({ port: hostPort });
-      setHostAddresses(started.addresses);
-      serverUrl = started.serverUrl;
-      setServerUrlInput(serverUrl);
-    }
-
-    const loginRes = await fetch(`${serverUrl}/api/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: username.trim() })
-    });
-
-    const loginData = await loginRes.json();
-
-    if (!loginRes.ok) {
-      showError(loginData.error || 'Failed to log in');      
-      return;
-    }
-
-    localStorage.setItem('lan_chat_user_name', username.trim());
-    localStorage.setItem('lan_chat_server_url', serverUrl);
-    localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
-
-    setMe(loginData.user);
-    meRef.current = loginData.user;
-    setUsers(loginData.users || []);
-    setConnectedServerUrl(serverUrl);
-
-    const socket = io(serverUrl, { transports: ['websocket'] });
-    socketRef.current = socket;
-
-    socket.on('connect', () => {
-      socket.emit('auth:join', { userId: loginData.user.id });
-      socket.emit(
-        'users:sync',
-        (payload: {
-          users: User[];
-          onlineUserIds: string[];
-          idleUserIds: string[];
-          activeChatTargets?: Record<string, string | null>;
-        }) => {
-          setUsers(payload.users);
-          setOnlineUserIds(payload.onlineUserIds || []);
-          setIdleUserIds(payload.idleUserIds || []);
-          setActiveChatTargets(payload.activeChatTargets || {});
-          const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
-          setSelectedUserId((curr) => curr || fallback);
-        }
-      );
-    });
-  }
-
   async function handleRegister() {
-    let serverUrl = serverUrlInput.trim();
-  
-    if (hostMode) {
-      const started = await desktopApi.startHost({ port: hostPort });
-      setHostAddresses(started.addresses);
-      serverUrl = started.serverUrl;
-      setServerUrlInput(serverUrl);
-    }
-  
     if (!loginUserId.trim()) {
       showError('Enter user ID');
       return;
@@ -1044,7 +960,7 @@ export default function App() {
       return;
     }
   
-    const res = await fetch(`${serverUrl}/api/register`, {
+    const res = await fetch(`${FIXED_SERVER_URL}/api/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1067,16 +983,7 @@ export default function App() {
   }
   
   async function handleLogin() {
-    let serverUrl = serverUrlInput.trim();
-  
-    if (hostMode) {
-      const started = await desktopApi.startHost({ port: hostPort });
-      setHostAddresses(started.addresses);
-      serverUrl = started.serverUrl;
-      setServerUrlInput(serverUrl);
-    }
-  
-    const res = await fetch(`${serverUrl}/api/login`, {
+    const res = await fetch(`${FIXED_SERVER_URL}/api/login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1085,67 +992,81 @@ export default function App() {
       })
     });
   
-    const data = await res.json();
+    const loginData = await res.json();
   
     if (!res.ok) {
-      showError(data.error || 'Login failed')
+      showError(loginData.error || 'Login failed');
       return;
     }
   
-    localStorage.setItem('lan_chat_auth_token', data.token);
-    localStorage.setItem('lan_chat_server_url', serverUrl);
-    localStorage.setItem('lan_chat_host_mode', hostMode ? '1' : '0');
+    localStorage.setItem('lan_chat_auth_token', loginData.token);
   
-    setAuthToken(data.token);
-    setConnectedServerUrl(serverUrl);
-    setMe(data.user);
-    meRef.current = data.user;
-    setUsers(data.users || []);
-    setOnlineUserIds(data.onlineUserIds || []);
-    setIdleUserIds(data.idleUserIds || []);
-    setProfileName(data.user.name || '');
+    setAuthToken(loginData.token);
+    setConnectedServerUrl(FIXED_SERVER_URL);
+    setMe(loginData.user);
+    meRef.current = loginData.user;
+    setUsers(loginData.users || []);
+    setOnlineUserIds(loginData.onlineUserIds || []);
+    setIdleUserIds(loginData.idleUserIds || []);
+    setProfileName(loginData.user.name || '');
+    setActiveChatTargets(loginData.activeChatTargets || {});
+    setHasExplicitContactSelection(false);
   
-    const socket = io(serverUrl, { transports: ['websocket'] });
+    socketRef.current?.disconnect();
+  
+    const socket = io(FIXED_SERVER_URL, { transports: ['websocket'] });
     socketRef.current = socket;
   
     socket.on('connect', () => {
-      socket.emit('auth:join', { token: data.token }, async (payload: any) => {
+      socket.emit('auth:join', { token: loginData.token }, async (payload: any) => {
         if (!payload?.ok) {
           showError(payload?.error || 'Socket login failed');
+          socket.disconnect();
           return;
         }
-      
+  
         setUsers(payload.users || []);
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
         setActiveChatTargets(payload.activeChatTargets || {});
         setHasExplicitContactSelection(false);
-
-        const fallback = payload.users.find((u: User) => u.id !== data.user.id)?.id || '';
+  
+        const fallback =
+          payload.users.find((u: User) => u.id !== loginData.user.id)?.id || '';
+  
         setSelectedUserId((curr) => curr || fallback);
-      
-        await loadAllHistories(payload.users || [], data.token);
-      
-        showSuccess(`Welcome, ${data.user.name || data.user.userId}!`);
+  
+        await loadAllHistories(payload.users || [], loginData.token);
+  
+        showSuccess(`Welcome, ${loginData.user.name || loginData.user.userId}!`);
       });
     });
   
     socket.on('auth:revoked', ({ reason }: { reason?: string }) => {
-      showError(reason || 'Your session was revoked by admin')
+      showError(reason || 'Your session was revoked by admin');
       localStorage.removeItem('lan_chat_auth_token');
       socket.disconnect();
       setActiveChatTargets({});
       setHasExplicitContactSelection(false);
       setMe(null);
+      meRef.current = null;
       setAuthToken('');
     });
-
+  
     socket.on(
       'message:status',
-      ({ messageId, deliveredAt, readAt }: { messageId: string; deliveredAt: number | null; readAt: number | null }) => {
+      ({
+        messageId,
+        deliveredAt,
+        readAt
+      }: {
+        messageId: string;
+        deliveredAt: number | null;
+        readAt: number | null;
+      }) => {
         setMessagesByConv((prev) => {
           const next: Record<string, Message[]> = {};
-
+  
           for (const [key, items] of Object.entries(prev)) {
             next[key] = items.map((m) =>
               m.id === messageId
@@ -1157,12 +1078,12 @@ export default function App() {
                 : m
             );
           }
-
+  
           return next;
         });
       }
     );
-
+  
     socket.on(
       'conversation:cleared-for-me',
       ({
@@ -1177,7 +1098,7 @@ export default function App() {
         setDeleteChatTargetUserId(null);
       }
     );
-
+  
     socket.on(
       'message:cleared-for-me',
       ({
@@ -1193,14 +1114,14 @@ export default function App() {
         setDeleteMessageTargetId(null);
       }
     );
-
+  
     socket.on(
       'chat:active-map',
       ({ activeChatTargets }: { activeChatTargets?: Record<string, string | null> }) => {
         setActiveChatTargets(activeChatTargets || {});
       }
     );
-
+  
     socket.on('users:changed', () => {
       socket.emit(
         'users:sync',
@@ -1210,15 +1131,24 @@ export default function App() {
           idleUserIds: string[];
           activeChatTargets?: Record<string, string | null>;
         }) => {
-          setUsers(payload.users);
+          setUsers(payload.users || []);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
           setActiveChatTargets(payload.activeChatTargets || {});
+  
+          const fallback =
+            payload.users.find((u: User) => u.id !== loginData.user.id)?.id || '';
+  
+          setSelectedUserId((curr) => {
+            const stillExists = payload.users.some((u: User) => u.id === curr);
+            return stillExists ? curr : fallback;
+          });
+  
           await loadAllHistories(payload.users || []);
         }
       );
     });
-
+  
     socket.on(
       'presence:update',
       (payload: { onlineUserIds: string[]; idleUserIds: string[] }) => {
@@ -1226,27 +1156,27 @@ export default function App() {
         setIdleUserIds(payload.idleUserIds || []);
       }
     );
-
+  
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
         const key = message.conversationKey;
         const next = [...(prev[key] || []), message];
         return { ...prev, [key]: next };
       });
-
+  
       const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
-
-      if (message.fromUserId !== data.user.id && isNormalNotifyMessage) {
-        const senderName = usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
+  
+      if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
+        const senderName =
+          usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
         const attachments = getMessageAttachments(message);
-
-        const body =
-          isGalleryMessage(message)
-            ? `${senderName} sent ${attachments.length} photos${message.text ? `: ${message.text}` : ''}`
-            : message.type === 'file'
-            ? `${senderName} sent ${attachments[0]?.isImage ? 'an image' : 'a file'}: ${attachments[0]?.filename || ''}`
-            : message.text;
-
+  
+        const body = isGalleryMessage(message)
+          ? `${senderName} sent ${attachments.length} photos${message.text ? `: ${message.text}` : ''}`
+          : message.type === 'file'
+          ? `${senderName} sent ${attachments[0]?.isImage ? 'an image' : 'a file'}: ${attachments[0]?.filename || ''}`
+          : message.text;
+  
         desktopApi.notify({
           title: senderName,
           body,
@@ -1254,24 +1184,24 @@ export default function App() {
           kind: 'message'
         });
       }
-
-      if (message.toUserId === data.user.id) {
+  
+      if (message.toUserId === loginData.user.id) {
         socket.emit('message:delivered', {
           messageId: message.id,
-          byUserId: data.user.id
+          byUserId: loginData.user.id
         });
-      
-        const shouldAffectUnread = isUnreadAffectingMessage(message, data.user.id);
-      
+  
+        const shouldAffectUnread = isUnreadAffectingMessage(message, loginData.user.id);
+  
         if (!shouldAffectUnread || canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
-            byUserId: data.user.id
+            byUserId: loginData.user.id
           });
         }
       }
     });
-
+  
     socket.on('message:deleted', (message: Message) => {
       setMessagesByConv((prev) => {
         const key = message.conversationKey;
@@ -1279,27 +1209,32 @@ export default function App() {
         return { ...prev, [key]: next };
       });
     });
-
-    socket.on('typing:update', ({ fromUserId, isTyping }: { fromUserId: string; isTyping: boolean }) => {
-      setTypingFrom((prev) => ({ ...prev, [fromUserId]: isTyping }));
-    });
-
+  
+    socket.on(
+      'typing:update',
+      ({ fromUserId, isTyping }: { fromUserId: string; isTyping: boolean }) => {
+        setTypingFrom((prev) => ({ ...prev, [fromUserId]: isTyping }));
+      }
+    );
+  
     socket.on('call:invite', ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
       const callMode = mode === 'audio' ? 'audio' : 'video';
-    
+  
       incomingFromUserIdRef.current = fromUserId;
       incomingCallModeRef.current = callMode;
-    
+  
       setIncomingFromUserId(fromUserId);
       setIncomingCallMode(callMode);
-    
-      const senderName = usersRef.current.find((u) => u.id === fromUserId)?.name || 'Incoming call';
+  
+      const senderName =
+        usersRef.current.find((u) => u.id === fromUserId)?.name || 'Incoming call';
+  
       setCallStatus(
         callMode === 'audio'
           ? `${senderName} is voice calling...`
           : `${senderName} is video calling...`
       );
-    
+  
       desktopApi.notify({
         title: callMode === 'audio' ? 'Incoming voice call' : 'Incoming video call',
         body: `${senderName} is calling you`,
@@ -1307,7 +1242,7 @@ export default function App() {
         kind: 'call'
       });
     });
-
+  
     socket.on(
       'conversation:deleted',
       ({
@@ -1321,82 +1256,92 @@ export default function App() {
         setDeleteChatTargetUserId(null);
       }
     );
-
-    socket.on('call:accepted', async ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
-      if (currentCallRef.current?.peerUserId !== fromUserId) return;
-    
-      try {
-        const callMode = currentCallRef.current?.mode || mode || 'video';
-    
-        setCallState((prev) => (prev ? { ...prev, phase: 'connecting', mode: callMode } : prev));
-        setCallStatus(
-          callMode === 'audio'
-            ? 'Creating secure local voice connection...'
-            : 'Creating secure local video connection...'
-        );
-    
-        const stream = await ensureLocalStream(callMode);
-        const peer = createPeer(fromUserId, stream);
-        const offer = await peer.createOffer();
-        await peer.setLocalDescription(offer);
-    
-        socket.emit('signal', {
-          fromUserId: data.user.id,
-          toUserId: fromUserId,
-          data: { type: 'offer', payload: offer }
-        });
-      } catch (error) {
-        const callMode = currentCallRef.current?.mode || mode || 'video';
-        const message = getCallDeviceErrorMessage(error, callMode);
-        setCallStatus(message);
-        showToast(message, 'error', 4200);
-        cleanupCall(false);
+  
+    socket.on(
+      'call:accepted',
+      async ({ fromUserId, mode }: { fromUserId: string; mode?: CallMode }) => {
+        if (currentCallRef.current?.peerUserId !== fromUserId) return;
+  
+        try {
+          const callMode = currentCallRef.current?.mode || mode || 'video';
+  
+          setCallState((prev) =>
+            prev ? { ...prev, phase: 'connecting', mode: callMode } : prev
+          );
+          setCallStatus(
+            callMode === 'audio'
+              ? 'Creating secure local voice connection...'
+              : 'Creating secure local video connection...'
+          );
+  
+          const stream = await ensureLocalStream(callMode);
+          const peer = createPeer(fromUserId, stream);
+          const offer = await peer.createOffer();
+          await peer.setLocalDescription(offer);
+  
+          socket.emit('signal', {
+            fromUserId: loginData.user.id,
+            toUserId: fromUserId,
+            data: { type: 'offer', payload: offer }
+          });
+        } catch (error) {
+          const callMode = currentCallRef.current?.mode || mode || 'video';
+          const message = getCallDeviceErrorMessage(error, callMode);
+          setCallStatus(message);
+          showToast(message, 'error', 4200);
+          cleanupCall(false);
+        }
       }
-    });
-
+    );
+  
     socket.on('call:declined', ({ fromUserId }: { fromUserId: string }) => {
       if (currentCallRef.current?.peerUserId === fromUserId) {
         setCallStatus('Call declined');
         cleanupCall(false);
       }
     });
-
+  
     socket.on('call:ended', ({ fromUserId }: { fromUserId: string }) => {
       const isIncomingDialogOpen = incomingFromUserIdRef.current === fromUserId;
       const isCurrentCallPeer = currentCallRef.current?.peerUserId === fromUserId;
-
+  
       if (!isIncomingDialogOpen && !isCurrentCallPeer) return;
-
+  
       incomingFromUserIdRef.current = null;
       cleanupCall(false);
       setIncomingFromUserId(null);
       setCallStatus('Call ended');
     });
-
+  
     socket.on(
       'signal',
       async ({
         fromUserId,
-        data
+        data: signalData
       }: {
         fromUserId: string;
         data: { type: 'offer' | 'answer' | 'candidate'; payload: any };
       }) => {
         try {
-          if (data.type === 'offer') {
-            const callMode = currentCallRef.current?.mode || incomingCallModeRef.current || 'video';
+          if (signalData.type === 'offer') {
+            const callMode =
+              currentCallRef.current?.mode || incomingCallModeRef.current || 'video';
+  
             const stream = await ensureLocalStream(callMode);
             const peer = createPeer(fromUserId, stream);
-            await peer.setRemoteDescription(new RTCSessionDescription(data.payload));
+            await peer.setRemoteDescription(
+              new RTCSessionDescription(signalData.payload)
+            );
+  
             const answer = await peer.createAnswer();
             await peer.setLocalDescription(answer);
-    
+  
             socket.emit('signal', {
-              fromUserId: data.user.id,
+              fromUserId: loginData.user.id,
               toUserId: fromUserId,
               data: { type: 'answer', payload: answer }
             });
-    
+  
             const nextCallState: CallState = {
               peerUserId: fromUserId,
               mode: callMode,
@@ -1404,17 +1349,21 @@ export default function App() {
               muted: false,
               cameraOff: callMode === 'audio'
             };
-    
+  
             currentCallRef.current = nextCallState;
             setCallState(nextCallState);
           }
-    
-          if (data.type === 'answer' && peerRef.current) {
-            await peerRef.current.setRemoteDescription(new RTCSessionDescription(data.payload));
+  
+          if (signalData.type === 'answer' && peerRef.current) {
+            await peerRef.current.setRemoteDescription(
+              new RTCSessionDescription(signalData.payload)
+            );
           }
-    
-          if (data.type === 'candidate' && peerRef.current) {
-            await peerRef.current.addIceCandidate(new RTCIceCandidate(data.payload));
+  
+          if (signalData.type === 'candidate' && peerRef.current) {
+            await peerRef.current.addIceCandidate(
+              new RTCIceCandidate(signalData.payload)
+            );
           }
         } catch (error) {
           console.error('signal failure', error);
@@ -1425,8 +1374,6 @@ export default function App() {
         }
       }
     );
-  
-    // keep your other socket handlers
   }
 
   function getRenderableUser(userId: string): User {
@@ -2056,7 +2003,7 @@ export default function App() {
       headers.set('Authorization', `Bearer ${token}`);
     }
   
-    return fetch(`${connectedServerUrl || serverUrlInput}${path}`, {
+    return fetch(`${connectedServerUrl || FIXED_SERVER_URL}${path}`, {
       ...init,
       headers
     });
@@ -2925,51 +2872,17 @@ export default function App() {
                 />
               </label>
             ) : null}
-  
-            <label className="checkbox-row">
-              <input
-                type="checkbox"
-                checked={hostMode}
-                onChange={(e) => setHostMode(e.target.checked)}
-              />
-              <span>Host the LAN server on this PC</span>
-            </label>
-  
-            {hostMode ? (
-              <label className="field">
-                <span>Host port</span>
-                <input
-                  type="number"
-                  value={hostPort}
-                  onChange={(e) => setHostPort(Number(e.target.value))}
-                />
-              </label>
-            ) : (
-              <label className="field">
-                <span>Server URL</span>
-                <input
-                  value={serverUrlInput}
-                  onChange={(e) => setServerUrlInput(e.target.value)}
-                  placeholder="http://192.168.1.25:4000"
-                />
-              </label>
-            )}
-  
+
             <button
               className="primary"
               onClick={authMode === 'login' ? handleLogin : handleRegister}
             >
               {authMode === 'login' ? 'Login' : 'Register'}
             </button>
-  
-            {hostAddresses.length ? (
-              <div className="host-box">
-                <strong>Share this LAN address with other users:</strong>
-                {hostAddresses.map((item) => (
-                  <div key={item}>{item}</div>
-                ))}
-              </div>
-            ) : null}
+
+            <div className="foot-note">
+              Server: {FIXED_SERVER_URL}
+            </div>  
   
             <div className="foot-note">
               App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}

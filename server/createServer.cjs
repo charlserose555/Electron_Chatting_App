@@ -1107,22 +1107,26 @@ function createLanServer({ port = 4000, userDataPath }) {
         callback?.({ ok: false, error: 'Unauthorized' });
         return;
       }
-
+    
       const user = getUserById(session.userId);
       if (!user || !user.isApproved || !user.canLogin) {
         callback?.({ ok: false, error: 'Login is not allowed' });
         return;
       }
-
+    
       socket.data.userId = user.id;
       socket.data.authToken = token;
-
+    
       onlineSockets.set(user.id, socket.id);
       idleUserIds.delete(user.id);
       activeChatTargets.set(user.id, null);
+    
       emitPresence();
       emitActiveChatTargets();
-
+    
+      // Tell other already-connected clients to refresh their user list
+      socket.broadcast.emit('users:changed');
+    
       callback?.({
         ok: true,
         ...serializeAuthPayload(user)
