@@ -112,10 +112,6 @@ button {
   height: 36px;
 }
 
-.contact-avatar-wrap {
-  position: relative;
-}
-
 .online-dot {
   position: absolute;
   right: 2px;
@@ -170,55 +166,9 @@ button {
   background: rgba(255, 255, 255, 0.04);
 }
 
-.contact-list {
-  padding: 8px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  scrollbar-width: none;
-  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
-}
-
-.contact-list::-webkit-scrollbar {
-  width: 0;
-  height: 0;
-}
-
-.contact-card {
-  width: 100%;
-  display: flex;
-  gap: 12px;
-  border: none;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  border-radius: 12px;
-  padding: 12px;
-}
-
 .contact-card.selected,
 .contact-card:hover {
   background: rgba(255, 255, 255, 0.04);
-}
-
-.contact-text {
-  min-width: 0;
-  flex: 1;
-}
-
-.contact-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
-}
-
-.contact-preview {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 14px;
 }
 
 .chat-panel {
@@ -2278,4 +2228,116 @@ button {
 .field + .primary,
 .checkbox-row + .primary {
   margin-top: 16px;
+}
+
+.unread-chip {
+  background: rgba(42, 171, 238, 0.14);
+  color: #2aabee;
+  border: 1px solid rgba(42, 171, 238, 0.25);
+}
+
+.contact-list {
+  padding: 8px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scrollbar-width: none;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+}
+
+.contact-list::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+.contact-card {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  border-radius: 16px;
+  padding: 12px;
+}
+
+.contact-avatar-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.contact-text {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "name meta"
+    "preview meta";
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: start;
+}
+
+.contact-head {
+  display: contents;
+}
+
+.contact-name {
+  grid-area: name;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.contact-head-right {
+  grid-area: meta;
+  justify-self: end;
+  align-self: stretch;
+  min-width: 56px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.contact-time {
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+  text-align: center;
+  color: var(--muted);
+}
+
+.contact-preview {
+  grid-area: preview;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--muted);
+}
+
+.contact-badge,
+.contact-badge.below-time {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: #4ea4f6;
+  box-shadow: 0 2px 8px rgba(78, 164, 246, 0.3);
+  color: #fff;
 }
