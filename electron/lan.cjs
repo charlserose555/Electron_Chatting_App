@@ -1,7 +1,52 @@
-const { app, BrowserWindow, ipcMain, Notification, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Notification, dialog } = require('electron');
 const path = require('node:path');
+const os = require('node:os');
+const { pathToFileURL } = require('node:url');
 
 let mainWindow;
+let lanServer;
+
+function getLanAddresses(port) {
+  const interfaces = os.networkInterfaces();
+  const urls = [];
+  for (const [name, records] of Object.entries(interfaces)) {
+    if (!records) continue;
+    for (const record of records) {
+      if (record.family === 'IPv4' && !record.internal) {
+        urls.push(`http://${record.address}:${port}`);
+      }
+    }
+  }
+  return urls;
+}
+
+async function ensureServerModule() {
+  const file = path.join(app.getAppPath(), 'server', 'createServer.cjs');
+  return require(file);
+}
+
+async function startHostInternal(port) {
+  if (lanServer) {
+    return { serverUrl: `http://127.0.0.1:${lanServer.port}`, addresses: getLanAddresses(lanServer.port) };
+  }
+  const mod = await ensureServerModule();
+  lanServer = mod.createLanServer({
+    port,
+    userDataPath: app.getPath('userData')
+  });
+  await lanServer.start('0.0.0.0');
+  return {
+    serverUrl: `http://127.0.0.1:${lanServer.port}`,
+    addresses: getLanAddresses(lanServer.port)
+  };
+}
+
+async function stopHostInternal() {
+  if (lanServer) {
+    await lanServer.stop();
+    lanServer = null;
+  }
+}
 
 async function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -24,13 +69,10 @@ async function createMainWindow() {
   });
 
   const startUrl = process.env.ELECTRON_START_URL;
-
   if (startUrl) {
     await mainWindow.loadURL(startUrl);
   } else {
-    await mainWindow.loadFile(
-      path.join(app.getAppPath(), 'client', 'dist', 'index.html')
-    );
+    await mainWindow.loadFile(path.join(app.getAppPath(), 'client', 'dist', 'index.html'));
   }
 }
 
@@ -40,27 +82,35 @@ app.whenReady().then(async () => {
     appVersion: app.getVersion()
   }));
 
+  ipcMain.handle('desktop:start-host', async (_event, args) => {
+    return await startHostInternal(Number(args?.port || 4000));
+  });
+
+  ipcMain.handle('desktop:stop-host', async () => {
+    await stopHostInternal();
+  });
+
   ipcMain.handle('desktop:notify', async (_event, args) => {
     if (!Notification.isSupported()) return;
-
-    const notification = new Notification({
+  
+    const n = new Notification({
       title: args.title,
       body: args.body
     });
-
-    notification.on('click', () => {
+  
+    n.on('click', () => {
       if (!mainWindow) return;
-
+  
       if (mainWindow.isMinimized()) {
         mainWindow.restore();
       }
-
+  
       if (!mainWindow.isVisible()) {
         mainWindow.show();
       }
-
+  
       mainWindow.focus();
-
+  
       if (args.userId) {
         mainWindow.webContents.send('desktop:navigate-to-chat', {
           userId: args.userId,
@@ -68,12 +118,12 @@ app.whenReady().then(async () => {
         });
       }
     });
-
-    notification.show();
+  
+    n.show();
   });
 
   ipcMain.handle('app:set-badge-count', async (_event, count) => {
-    if (typeof app.setBadgeCount === 'function') {
+    if (app.setBadgeCount) {
       app.setBadgeCount(count);
     }
   });
@@ -82,26 +132,9 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
       filters: [
-        {
-          name: 'Images and Files',
-          extensions: [
-            'png',
-            'jpg',
-            'jpeg',
-            'gif',
-            'webp',
-            'pdf',
-            'txt',
-            'doc',
-            'docx',
-            'xls',
-            'xlsx',
-            'zip'
-          ]
-        }
+        { name: 'Images and Files', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'txt', 'doc', 'docx', 'xls', 'xlsx', 'zip'] }
       ]
     });
-
     if (result.canceled) return null;
     return result.filePaths;
   });
@@ -115,7 +148,8 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on('window-all-closed', () => {
+app.on('window-all-closed', async () => {
+  await stopHostInternal();
   if (process.platform !== 'darwin') app.quit();
 });
 
