@@ -717,6 +717,8 @@ export default function App() {
   const [adminSearch, setAdminSearch] = useState('');
   const suppressAutoReadUntilBottomRef = useRef(false);
   const hasUserScrolledCurrentChatRef = useRef(false);
+  const [activeChatTargets, setActiveChatTargets] = useState<Record<string, string | null>>({});
+  const [hasExplicitContactSelection, setHasExplicitContactSelection] = useState(false);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -771,6 +773,16 @@ export default function App() {
       });
     };
   }, []);
+
+  useEffect(() => {
+    if (!socketRef.current || !me) return;
+  
+    socketRef.current.emit('chat:selected-peer', {
+      selectedPeerUserId:
+        isWindowActive && hasExplicitContactSelection ? selectedUserId || null : null,
+      isWindowActive
+    });
+  }, [me, selectedUserId, isWindowActive, hasExplicitContactSelection]);
 
   useEffect(() => {
     return () => {
@@ -828,6 +840,7 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = desktopApi.onNavigateToChat?.(({ userId, kind }) => {
       autoScrollRef.current = true;
+      setHasExplicitContactSelection(false);
       setSelectedUserId(userId);
 
       if (kind === 'call') {
@@ -989,10 +1002,16 @@ export default function App() {
       socket.emit('auth:join', { userId: loginData.user.id });
       socket.emit(
         'users:sync',
-        (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+        (payload: {
+          users: User[];
+          onlineUserIds: string[];
+          idleUserIds: string[];
+          activeChatTargets?: Record<string, string | null>;
+        }) => {
           setUsers(payload.users);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
+          setActiveChatTargets(payload.activeChatTargets || {});
           const fallback = payload.users.find((u) => u.id !== loginData.user.id)?.id || '';
           setSelectedUserId((curr) => curr || fallback);
         }
@@ -1099,7 +1118,9 @@ export default function App() {
         setUsers(payload.users || []);
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
-      
+        setActiveChatTargets(payload.activeChatTargets || {});
+        setHasExplicitContactSelection(false);
+
         const fallback = payload.users.find((u: User) => u.id !== data.user.id)?.id || '';
         setSelectedUserId((curr) => curr || fallback);
       
@@ -1113,6 +1134,8 @@ export default function App() {
       showError(reason || 'Your session was revoked by admin')
       localStorage.removeItem('lan_chat_auth_token');
       socket.disconnect();
+      setActiveChatTargets({});
+      setHasExplicitContactSelection(false);
       setMe(null);
       setAuthToken('');
     });
@@ -1171,13 +1194,26 @@ export default function App() {
       }
     );
 
+    socket.on(
+      'chat:active-map',
+      ({ activeChatTargets }: { activeChatTargets?: Record<string, string | null> }) => {
+        setActiveChatTargets(activeChatTargets || {});
+      }
+    );
+
     socket.on('users:changed', () => {
       socket.emit(
         'users:sync',
-        async (payload: { users: User[]; onlineUserIds: string[]; idleUserIds: string[] }) => {
+        async (payload: {
+          users: User[];
+          onlineUserIds: string[];
+          idleUserIds: string[];
+          activeChatTargets?: Record<string, string | null>;
+        }) => {
           setUsers(payload.users);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
+          setActiveChatTargets(payload.activeChatTargets || {});
           await loadAllHistories(payload.users || []);
         }
       );
@@ -1407,6 +1443,11 @@ export default function App() {
     );
   }
 
+  function handleSelectContact(userId: string) {
+    setHasExplicitContactSelection(true);
+    setSelectedUserId(userId);
+  }
+
   const filteredAdminUsers = useMemo(() => {
     const q = adminSearch.trim().toLowerCase();
     if (!q) return adminUsers;
@@ -1467,6 +1508,14 @@ export default function App() {
   
     peerRef.current = peer;
     return peer;
+  }
+
+  function isUserSelectingMe(userId: string) {
+    return !!me && activeChatTargets[userId] === me.id;
+  }
+  
+  function isSelectedTogether(userId: string) {
+    return !!me && selectedUserId === userId && activeChatTargets[userId] === me.id;
   }
 
   function isImageFileType(mimeType?: string, fileName?: string) {
@@ -2737,14 +2786,35 @@ export default function App() {
         suppressAutoReadUntilBottomRef.current = true;
         hasUserScrolledCurrentChatRef.current = false;
   
-        const el = document.querySelector(
+        const targetEl = document.querySelector(
           `[data-message-id="${firstUnreadMessageId}"]`
         ) as HTMLElement | null;
   
-        if (el) {
-          el.scrollIntoView({ behavior: 'auto', block: 'center' });
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'auto', block: 'center' });
           autoScrollRef.current = false;
           syncMessageViewportState();
+  
+          requestAnimationFrame(() => {
+            const messagesEl = messagesRef.current;
+            if (!messagesEl) return;
+  
+            const hasScrollableArea =
+              messagesEl.scrollHeight > messagesEl.clientHeight + 1;
+  
+            // Only auto-clear unread when the chat cannot scroll at all.
+            // For scrollable chats, keep the existing behavior:
+            // unread disappears only after the user reaches the bottom.
+            if (!hasScrollableArea) {
+              suppressAutoReadUntilBottomRef.current = false;
+              hasUserScrolledCurrentChatRef.current = true;
+              autoScrollRef.current = true;
+  
+              markUnreadMessagesAsRead(selectedUserId, activeMessagesRef.current);
+              syncMessageViewportState();
+            }
+          });
+  
           return;
         }
       }
@@ -2948,6 +3018,8 @@ export default function App() {
                 socketRef.current?.disconnect();
                 localStorage.removeItem('lan_chat_auth_token');
                 meRef.current = null;
+                setActiveChatTargets({});
+                setHasExplicitContactSelection(false);
                 setMe(null);
                 setAuthToken('');
               }}
@@ -2980,16 +3052,19 @@ export default function App() {
                 const last = conv[conv.length - 1];
                 const presence = getPresence(user.id);
                 const unreadCount = unreadCountByUser[user.id] || 0;
+                const selectedTogether = presence === 'online' && isSelectedTogether(user.id);
 
                 return (
                   <button
                     key={user.id}
                     className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedUserId(user.id)}
+                    onClick={() => handleSelectContact(user.id)}
                   >
                     <div className="contact-avatar-wrap">
                       <UserAvatar user={user} serverUrl={connectedServerUrl} />
-                        <span className={`online-dot ${presence === 'idle' ? 'idle' : ''}`} />
+                        <span
+                          className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                        />
                       </div>
                     <div className="contact-text">
                       <div className="contact-head">
@@ -3028,7 +3103,7 @@ export default function App() {
                   <button
                     key={user.id}
                     className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => setSelectedUserId(user.id)}
+                    onClick={() => handleSelectContact(user.id)}
                   >
                     <div className="contact-avatar-wrap">
                       <UserAvatar user={user} serverUrl={connectedServerUrl} />
@@ -3074,7 +3149,13 @@ export default function App() {
                 <div className="contact-avatar-wrap">
                   <UserAvatar user={selectedUser} serverUrl={connectedServerUrl} />
                   {getPresence(selectedUser.id) !== 'offline' ? (
-                    <span className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''}`} />
+                    <span
+                      className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''} ${
+                        getPresence(selectedUser.id) === 'online' && isSelectedTogether(selectedUser.id)
+                          ? 'selected-together'
+                          : ''
+                      }`}
+                    />
                   ) : null}
                 </div>
                 <div>
