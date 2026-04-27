@@ -22,6 +22,7 @@ function createLanServer({ port = 4000, userDataPath }) {
   const activeCalls = new Map(); // conversationKey -> { fromUserId, toUserId, mode, timeoutId }
   const onlineSockets = new Map(); // userId -> socketId
   const idleUserIds = new Set();
+  const activeChatTargets = new Map(); // userId -> selectedPeerUserId | null
 
   function safeUserId(value) {
     return String(value || '')
@@ -306,7 +307,8 @@ function createLanServer({ port = 4000, userDataPath }) {
     return {
       user: sanitizeUser(user, user),
       users: getVisibleUsersFor(user),
-      ...getPresencePayload()
+      ...getPresencePayload(),
+      ...getActiveChatTargetsPayload()
     };
   }
 
@@ -318,6 +320,47 @@ function createLanServer({ port = 4000, userDataPath }) {
       onlineUserIds,
       idleUserIds: [...idleUserIds].filter((userId) => onlineUserIdSet.has(userId))
     };
+  }
+
+  function getActiveChatTargetsPayload() {
+    const result = {};
+  
+    for (const [userId, selectedPeerUserId] of activeChatTargets.entries()) {
+      result[userId] = selectedPeerUserId || null;
+    }
+  
+    return {
+      activeChatTargets: result
+    };
+  }
+  
+  function emitActiveChatTargets() {
+    io.emit('chat:active-map', getActiveChatTargetsPayload());
+  }
+  
+  function setActiveChatTarget(userId, selectedPeerUserId, isWindowActive = true) {
+    if (!userId) return;
+  
+    const nextPeerUserId = isWindowActive ? String(selectedPeerUserId || '') : '';
+    const nextValue =
+      nextPeerUserId &&
+      nextPeerUserId !== userId &&
+      getUserById(nextPeerUserId)
+        ? nextPeerUserId
+        : null;
+  
+    if (activeChatTargets.get(userId) === nextValue) return;
+  
+    activeChatTargets.set(userId, nextValue);
+    emitActiveChatTargets();
+  }
+  
+  function clearActiveChatTarget(userId) {
+    if (!userId) return;
+    if (!activeChatTargets.has(userId)) return;
+  
+    activeChatTargets.delete(userId);
+    emitActiveChatTargets();
   }
 
   function findMessageById(messageId) {
@@ -738,6 +781,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
     onlineSockets.delete(targetUserId);
     idleUserIds.delete(targetUserId);
+    clearActiveChatTarget(targetUserId);
     emitPresence();
   }
 
@@ -1075,7 +1119,9 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       onlineSockets.set(user.id, socket.id);
       idleUserIds.delete(user.id);
+      activeChatTargets.set(user.id, null);
       emitPresence();
+      emitActiveChatTargets();
 
       callback?.({
         ok: true,
@@ -1090,8 +1136,20 @@ function createLanServer({ port = 4000, userDataPath }) {
       callback?.({
         ok: !!user,
         users: user ? getVisibleUsersFor(user) : [],
-        ...getPresencePayload()
+        ...getPresencePayload(),
+        ...getActiveChatTargetsPayload()
       });
+    });
+
+    socket.on('chat:selected-peer', ({ selectedPeerUserId, isWindowActive }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized' });
+        return;
+      }
+
+      setActiveChatTarget(userId, selectedPeerUserId, isWindowActive !== false);
+      callback?.({ ok: true });
     });
 
     socket.on('presence:set-state', ({ state }) => {
@@ -1431,6 +1489,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       if (onlineSockets.get(userId) === socket.id) {
         onlineSockets.delete(userId);
         idleUserIds.delete(userId);
+        clearActiveChatTarget(userId);
         emitUsersChanged();
         emitPresence();
       }
