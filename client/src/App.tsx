@@ -73,6 +73,8 @@ type Message = {
   readAt: number | null;
 };
 
+type SidebarTab = 'chats' | 'calls';
+
 type PendingUpload = {
   id: string;
   file: Blob;
@@ -670,6 +672,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<null | { messageId: string; x: number; y: number }>(null);
   const [incomingCallMode, setIncomingCallMode] = useState<CallMode | null>(null);
   const incomingCallModeRef = useRef<CallMode | null>(null);
+  const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>('chats');
 
   const usersRef = useRef<User[]>([]);
   const selectedUserIdRef = useRef('');
@@ -1406,6 +1409,29 @@ export default function App() {
       );
     });
   }, [adminUsers, adminSearch]);
+
+  const allCallHistory = useMemo(() => {
+    if (!me) return [] as Array<{
+      message: Message;
+      peerUserId: string;
+      peer: User | null;
+    }>;
+  
+    return Object.values(messagesByConv)
+      .flat()
+      .filter((message) => message.type === 'call')
+      .map((message) => {
+        const peerUserId =
+          message.fromUserId === me.id ? message.toUserId : message.fromUserId;
+  
+        return {
+          message,
+          peerUserId,
+          peer: users.find((u) => u.id === peerUserId) || null
+        };
+      })
+      .sort((a, b) => b.message.createdAt - a.message.createdAt);
+  }, [messagesByConv, users, me]);
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
@@ -2949,102 +2975,179 @@ export default function App() {
         </div>
 
         <div className="tabs">
-          <button className="tab active">Chats</button>
-          <button className="tab">Calls</button>
-          <button className="tab">Contacts</button>
-          <button className="tab">Notification</button>
+          <button
+            className={`tab ${activeSidebarTab === 'chats' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('chats')}
+          >
+            Chats
+          </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'calls' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('calls')}
+          >
+            Calls
+          </button>
         </div>
 
         <div className="contact-list">
-          {groupedContacts.online.length ? (
+          {activeSidebarTab === 'chats' ? (
+            <>
+              {groupedContacts.online.length ? (
+                <div className="contact-group">
+                  <div className="contact-group-title">Online</div>
+
+                  {groupedContacts.online.map((user) => {
+                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                    const last = conv[conv.length - 1];
+                    const presence = getPresence(user.id);
+                    const unreadCount = unreadCountByUser[user.id] || 0;
+                    const selectedTogether =
+                      presence === 'online' && isSelectedTogether(user.id);
+
+                    return (
+                      <button
+                        key={user.id}
+                        className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
+                        onClick={() => handleSelectContact(user.id)}
+                      >
+                        <div className="contact-avatar-wrap">
+                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                          <span
+                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                          />
+                        </div>
+
+                        <div className="contact-text">
+                          <div className="contact-head">
+                            <span className="contact-name">{user.name}</span>
+
+                            <div className="contact-head-right">
+                              <span className="contact-time">
+                                {timeLabel(last?.createdAt)}
+                              </span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="contact-preview">
+                            {typingFrom[user.id]
+                              ? 'typing...'
+                              : previewText(last, me.id, users)}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {groupedContacts.offline.length ? (
+                <div className="contact-group">
+                  <div className="contact-group-title offline">Offline</div>
+
+                  {groupedContacts.offline.map((user) => {
+                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                    const last = conv[conv.length - 1];
+                    const unreadCount = unreadCountByUser[user.id] || 0;
+
+                    return (
+                      <button
+                        key={user.id}
+                        className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
+                        onClick={() => handleSelectContact(user.id)}
+                      >
+                        <div className="contact-avatar-wrap">
+                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        </div>
+
+                        <div className="contact-text">
+                          <div className="contact-head">
+                            <span className="contact-name">{user.name}</span>
+
+                            <div className="contact-head-right">
+                              <span className="contact-time">
+                                {timeLabel(last?.createdAt)}
+                              </span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="contact-preview">
+                            {typingFrom[user.id]
+                              ? 'typing...'
+                              : previewText(last, me.id, users)}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : (
             <div className="contact-group">
-              <div className="contact-group-title">Online</div>
+              <div className="contact-group-title">All Call History</div>
 
-              {groupedContacts.online.map((user) => {
-                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                const last = conv[conv.length - 1];
-                const presence = getPresence(user.id);
-                const unreadCount = unreadCountByUser[user.id] || 0;
-                const selectedTogether = presence === 'online' && isSelectedTogether(user.id);
+              {allCallHistory.length ? (
+                allCallHistory.map(({ message, peerUserId, peer }) => {
+                  const displayName = peer?.name || userName(peerUserId);
+                  const isSelected = selectedUserId === peerUserId;
 
-                return (
-                  <button
-                    key={user.id}
-                    className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => handleSelectContact(user.id)}
-                  >
-                    <div className="contact-avatar-wrap">
-                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
-                        <span
-                          className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                  return (
+                    <button
+                      key={message.id}
+                      className={`contact-card ${isSelected ? 'selected' : ''}`}
+                      onClick={() => {
+                        setActiveSidebarTab('chats');
+                        handleSelectContact(peerUserId);
+                      }}
+                    >
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar
+                          user={
+                            peer || {
+                              id: peerUserId,
+                              userId: peerUserId,
+                              name: displayName
+                            }
+                          }
+                          serverUrl={connectedServerUrl}
                         />
                       </div>
-                    <div className="contact-text">
-                      <div className="contact-head">
-                        <span className="contact-name">{user.name}</span>
 
-                        <div className="contact-head-right">
-                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-
-                          {unreadCount > 0 ? (
-                            <span className="contact-badge below-time">
-                              {unreadCount > 99 ? '99+' : unreadCount}
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{displayName}</span>
+                          <div className="contact-head-right">
+                            <span className="contact-time">
+                              {timeLabel(message.createdAt)}
                             </span>
-                          ) : null}
+                          </div>
+                        </div>
+
+                        <div className="contact-preview">
+                          {callHistoryLabel(message, me.id, users)}
                         </div>
                       </div>
-                      <div className="contact-preview">
-                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="admin-empty">No call history yet.</div>
+              )}
             </div>
-          ) : null}
-
-          {groupedContacts.offline.length ? (
-            <div className="contact-group">
-              <div className="contact-group-title offline">Offline</div>
-
-              {groupedContacts.offline.map((user) => {
-                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                const last = conv[conv.length - 1];
-                const unreadCount = unreadCountByUser[user.id] || 0;
-
-                return (
-                  <button
-                    key={user.id}
-                    className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => handleSelectContact(user.id)}
-                  >
-                    <div className="contact-avatar-wrap">
-                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
-                    </div>
-
-                    <div className="contact-text">
-                      <div className="contact-head">
-                        <span className="contact-name">{user.name}</span>
-
-                        <div className="contact-head-right">
-                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-
-                          {unreadCount > 0 ? (
-                            <span className="contact-badge below-time">
-                              {unreadCount > 99 ? '99+' : unreadCount}
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="contact-preview">
-                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
+          )}
         </div>
       </aside>
 
