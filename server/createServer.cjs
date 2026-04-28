@@ -148,11 +148,32 @@ function createLanServer({ port = 4000, userDataPath }) {
     return Array.isArray(rawGroups) ? rawGroups.map(normalizeGroupRecord) : [];
   }
 
+  function normalizeNotificationRecord(raw) {
+    return {
+      id: String(raw?.id || createId('ntf')),
+      recipientUserId: String(raw?.recipientUserId || ''),
+      actorUserId: String(raw?.actorUserId || raw?.userId || ''),
+      kind: raw?.kind === 'logout' ? 'logout' : 'login',
+      userName:
+        safeDisplayName(raw?.userName || raw?.actorName || raw?.name || 'Unknown') ||
+        'Unknown',
+      avatarUrl: typeof raw?.avatarUrl === 'string' ? raw.avatarUrl : null,
+      createdAt: Number(raw?.createdAt) || Date.now()
+    };
+  }
+  
+  function normalizeNotifications(rawNotifications) {
+    return Array.isArray(rawNotifications)
+      ? rawNotifications.map(normalizeNotificationRecord)
+      : [];
+  }
+
   function normalizeDbShape(raw) {
     return {
       users: normalizeUsers(raw?.users),
       groups: normalizeGroups(raw?.groups),
       messages: Array.isArray(raw?.messages) ? raw.messages : [],
+      notifications: normalizeNotifications(raw?.notifications),
       conversationStates: Array.isArray(raw?.conversationStates)
         ? raw.conversationStates
         : [],
@@ -169,6 +190,7 @@ function createLanServer({ port = 4000, userDataPath }) {
         users: [],
         groups: [],
         messages: [],
+        notifications: [],
         conversationStates: [],
         messageStates: [],
         sessions: []
@@ -185,6 +207,7 @@ function createLanServer({ port = 4000, userDataPath }) {
         users: [],
         groups: [],
         messages: [],
+        notifications: [],
         conversationStates: [],
         messageStates: [],
         sessions: []
@@ -299,6 +322,105 @@ function createLanServer({ port = 4000, userDataPath }) {
       mustChangePassword: isSelf || isAdmin ? !!user.mustChangePassword : undefined,
       createdAt: user.createdAt
     };
+  }
+
+  function sanitizeNotification(notification) {
+    return {
+      id: notification.id,
+      kind: notification.kind === 'logout' ? 'logout' : 'login',
+      userId: notification.actorUserId,
+      userName: notification.userName,
+      avatarUrl: notification.avatarUrl || null,
+      createdAt: notification.createdAt
+    };
+  }
+  
+  function getNotificationsForUser(userId) {
+    return db.notifications
+      .filter((item) => item.recipientUserId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(sanitizeNotification);
+  }
+  
+  function clearNotificationsForUser(userId) {
+    const before = db.notifications.length;
+  
+    db.notifications = db.notifications.filter(
+      (item) => item.recipientUserId !== userId
+    );
+  
+    const clearedCount = before - db.notifications.length;
+  
+    if (clearedCount > 0) {
+      saveDb();
+    }
+  
+    return {
+      ok: true,
+      clearedCount
+    };
+  }
+  
+  function getPresenceNotificationRecipients(actorUserId) {
+    return db.users.filter(
+      (user) =>
+        user.id !== actorUserId &&
+        (user.role === 'admin' || user.isApproved)
+    );
+  }
+  
+  function pruneNotificationsForRecipients(recipientIds, maxPerUser = 200) {
+    const uniqueRecipientIds = [...new Set(recipientIds)];
+  
+    for (const recipientUserId of uniqueRecipientIds) {
+      const keepIds = new Set(
+        db.notifications
+          .filter((item) => item.recipientUserId === recipientUserId)
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, maxPerUser)
+          .map((item) => item.id)
+      );
+  
+      db.notifications = db.notifications.filter(
+        (item) =>
+          item.recipientUserId !== recipientUserId || keepIds.has(item.id)
+      );
+    }
+  }
+  
+  function persistPresenceNotifications(user, kind) {
+    const recipients = getPresenceNotificationRecipients(user.id);
+    if (!recipients.length) return [];
+  
+    const now = Date.now();
+  
+    const created = recipients.map((recipient) => ({
+      id: createId('ntf'),
+      recipientUserId: recipient.id,
+      actorUserId: user.id,
+      kind: kind === 'logout' ? 'logout' : 'login',
+      userName: user.name || user.userId,
+      avatarUrl: user.avatarUrl || null,
+      createdAt: now
+    }));
+  
+    db.notifications.push(...created);
+    pruneNotificationsForRecipients(recipients.map((item) => item.id));
+    saveDb();
+  
+    return created;
+  }
+  
+  function emitNotificationsToRecipients(notifications) {
+    for (const notification of notifications) {
+      const socketId = onlineSockets.get(notification.recipientUserId);
+      if (!socketId) continue;
+  
+      io.to(socketId).emit(
+        'notification:user-presence',
+        sanitizeNotification(notification)
+      );
+    }
   }
 
   function getVisibleUsersFor(viewer) {
@@ -473,6 +595,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       user: sanitizeUser(user, user),
       users: getVisibleUsersFor(user),
       groups: getGroupsForUser(user.id).map(sanitizeGroup),
+      notifications: getNotificationsForUser(user.id),
       ...getPresencePayload(),
       ...getActiveChatTargetsPayload()
     };
@@ -629,7 +752,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       : message.attachment
       ? [message.attachment]
       : [];
-
+  
     return {
       id: message.id,
       conversationKey:
@@ -655,7 +778,10 @@ function createLanServer({ port = 4000, userDataPath }) {
       deletedAt: message.deletedAt || null,
       deletedByUserId: message.deletedByUserId || null,
       deliveredAt: message.deliveredAt || null,
-      readAt: message.readAt || null
+      readAt: message.readAt || null,
+      groupReadByUserIds: Array.isArray(message.groupReadByUserIds)
+        ? [...message.groupReadByUserIds]
+        : null
     };
   }
 
@@ -705,7 +831,8 @@ function createLanServer({ port = 4000, userDataPath }) {
       deletedAt: null,
       deletedByUserId: null,
       deliveredAt: null,
-      readAt: null
+      readAt: null,
+      groupReadByUserIds: groupId ? [fromUserId] : null
     };
 
     db.messages.push(message);
@@ -734,6 +861,53 @@ function createLanServer({ port = 4000, userDataPath }) {
         createdAt: Date.now()
       }
     });
+  }
+
+  function markGroupMessagesAsRead({ groupId, userId, messageIds }) {
+    const group = getGroupById(groupId);
+  
+    if (!group || !isGroupMember(groupId, userId)) {
+      return { ok: false, error: 'Unauthorized group access' };
+    }
+  
+    const wantedIds = new Set(
+      Array.isArray(messageIds)
+        ? messageIds.map((v) => String(v || '')).filter(Boolean)
+        : []
+    );
+  
+    if (!wantedIds.size) {
+      return { ok: true, groupId, userId, messageIds: [] };
+    }
+  
+    const updatedIds = [];
+  
+    for (const message of db.messages) {
+      if (message.groupId !== groupId) continue;
+      if (!wantedIds.has(message.id)) continue;
+      if (message.fromUserId === userId) continue;
+      if (message.type === 'deleted') continue;
+  
+      const current = Array.isArray(message.groupReadByUserIds)
+        ? message.groupReadByUserIds
+        : [];
+  
+      if (!current.includes(userId)) {
+        message.groupReadByUserIds = [...current, userId];
+        updatedIds.push(message.id);
+      }
+    }
+  
+    if (updatedIds.length) {
+      saveDb();
+    }
+  
+    return {
+      ok: true,
+      groupId,
+      userId,
+      messageIds: updatedIds
+    };
   }
 
   function deleteMessage({ messageId, byUserId }) {
@@ -869,6 +1043,17 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function emitPresence() {
     io.emit('presence:update', getPresencePayload());
+  }
+
+  function createPresenceNotification(user, kind) {
+    return {
+      id: createId('ntf'),
+      kind, // 'login' | 'logout'
+      userId: user.id,
+      userName: user.name || user.userId,
+      avatarUrl: user.avatarUrl || null,
+      createdAt: Date.now()
+    };
   }
 
   function emitMessageToParticipants(message) {
@@ -1081,6 +1266,18 @@ function createLanServer({ port = 4000, userDataPath }) {
       users: getVisibleUsersFor(req.user),
       ...getPresencePayload()
     });
+  });
+
+  app.get('/api/notifications', requireAuth, (req, res) => {
+    res.json({
+      ok: true,
+      notifications: getNotificationsForUser(req.user.id)
+    });
+  });
+  
+  app.post('/api/notifications/clear', requireAuth, (req, res) => {
+    const result = clearNotificationsForUser(req.user.id);
+    res.json(result);
   });
 
   app.get('/api/groups', requireAuth, (req, res) => {
@@ -1372,27 +1569,34 @@ function createLanServer({ port = 4000, userDataPath }) {
         callback?.({ ok: false, error: 'Unauthorized' });
         return;
       }
-
+    
       const user = getUserById(session.userId);
       if (!user || !user.isApproved || !user.canLogin) {
         callback?.({ ok: false, error: 'Login is not allowed' });
         return;
       }
-
+    
+      const wasAlreadyOnline = onlineSockets.has(user.id);
+    
       socket.data.userId = user.id;
       socket.data.authToken = token;
-
+    
       onlineSockets.set(user.id, socket.id);
       idleUserIds.delete(user.id);
       activeChatTargets.set(user.id, null);
-
+    
       syncSocketGroupRooms(socket, user.id);
-
+    
       emitPresence();
       emitActiveChatTargets();
-
+    
       socket.broadcast.emit('users:changed');
-
+    
+      if (!wasAlreadyOnline) {
+        const createdNotifications = persistPresenceNotifications(user, 'login');
+        emitNotificationsToRecipients(createdNotifications);
+      }
+    
       callback?.({
         ok: true,
         ...serializeAuthPayload(user)
@@ -1546,6 +1750,35 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       emitMessageToParticipants(message);
       callback?.({ ok: true, message: serializeMessage(message) });
+    });
+
+    socket.on('group:read', ({ groupId, messageIds }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized' });
+        return;
+      }
+    
+      const result = markGroupMessagesAsRead({
+        groupId: String(groupId || ''),
+        userId,
+        messageIds: Array.isArray(messageIds) ? messageIds : []
+      });
+    
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      if (result.messageIds.length) {
+        io.to(`group:${result.groupId}`).emit('group:read:update', {
+          groupId: result.groupId,
+          userId: result.userId,
+          messageIds: result.messageIds
+        });
+      }
+    
+      callback?.(result);
     });
 
     socket.on('message:delete', ({ messageId }, callback) => {
@@ -1807,13 +2040,20 @@ function createLanServer({ port = 4000, userDataPath }) {
     socket.on('disconnect', () => {
       const userId = socket.data.userId;
       if (!userId) return;
-
+    
       if (onlineSockets.get(userId) === socket.id) {
+        const user = getUserById(userId);
+    
         onlineSockets.delete(userId);
         idleUserIds.delete(userId);
         clearActiveChatTarget(userId);
         emitUsersChanged();
         emitPresence();
+    
+        if (user) {
+          const createdNotifications = persistPresenceNotifications(user, 'logout');
+          emitNotificationsToRecipients(createdNotifications);
+        }
       }
     });
   });

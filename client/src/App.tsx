@@ -40,6 +40,15 @@ type AppToast = {
   tone: ToastTone;
 };
 
+type AppNotification = {
+  id: string;
+  kind: 'login' | 'logout';
+  userId: string;
+  userName: string;
+  avatarUrl?: string | null;
+  createdAt: number;
+};
+
 type CallMode = 'audio' | 'video';
 
 type GroupChat = {
@@ -82,9 +91,10 @@ type Message = {
   deletedByUserId: string | null;
   deliveredAt: number | null;
   readAt: number | null;
+  groupReadByUserIds: string[] | null;
 };
 
-type SidebarTab = 'chats' | 'calls';
+type SidebarTab = 'chats' | 'calls' | 'notifications';
 
 type PendingUpload = {
   id: string;
@@ -95,6 +105,30 @@ type PendingUpload = {
   isImage: boolean;
   previewUrl: string | null;
 };
+
+type ContactListItem =
+  | {
+      kind: 'group';
+      id: string;
+      title: string;
+      group: GroupChat;
+      last?: Message;
+      unreadCount: number;
+      typingText: string;
+      sortAt: number;
+    }
+  | {
+      kind: 'direct';
+      id: string;
+      title: string;
+      user: User;
+      last?: Message;
+      unreadCount: number;
+      typingText: string;
+      presence: 'online' | 'idle' | 'offline';
+      selectedTogether: boolean;
+      sortAt: number;
+    };
 
 type LightboxState =
   | {
@@ -650,6 +684,42 @@ function UserAvatar({
   );
 }
 
+function presenceNotificationText(item: AppNotification) {
+  return item.kind === 'login'
+    ? `${item.userName} logged in`
+    : `${item.userName} logged out`;
+}
+
+function playPresenceNotificationSound() {
+  try {
+    const AudioContextCtor =
+      window.AudioContext || (window as any).webkitAudioContext;
+
+    if (!AudioContextCtor) return;
+
+    const ctx = new AudioContextCtor();
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
+
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 0.24);
+
+    oscillator.onended = () => {
+      void ctx.close().catch(() => undefined);
+    };
+  } catch {}
+}
+
 export default function App() {
   const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
 
@@ -744,6 +814,11 @@ export default function App() {
   const [activeChatTargets, setActiveChatTargets] = useState<Record<string, string | null>>({});
   const [hasExplicitContactSelection, setHasExplicitContactSelection] = useState(false);
   const [isSocketAuthed, setIsSocketAuthed] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const activeSidebarTabRef = useRef<SidebarTab>('chats');
+  const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false);
+  const sidebarMenuRef = useRef<HTMLDivElement | null>(null);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -799,6 +874,40 @@ export default function App() {
   useEffect(() => {
     pendingUploadsRef.current = pendingUploads;
   }, [pendingUploads]);
+
+  useEffect(() => {
+    activeSidebarTabRef.current = activeSidebarTab;
+  }, [activeSidebarTab]);
+
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (!sidebarMenuRef.current) return;
+  
+      if (!sidebarMenuRef.current.contains(event.target as Node)) {
+        setSidebarMenuOpen(false);
+      }
+    }
+  
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setSidebarMenuOpen(false);
+      }
+    }
+  
+    window.addEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('keydown', handleEscape);
+  
+    return () => {
+      window.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeSidebarTab === 'notifications') {
+      setUnreadNotificationCount(0);
+    }
+  }, [activeSidebarTab]);
   
   useEffect(() => {
     return () => {
@@ -1061,11 +1170,15 @@ export default function App() {
     setProfileName(loginData.user.name || '');
     setActiveChatTargets(loginData.activeChatTargets || {});
     setHasExplicitContactSelection(false);
+    setNotifications(loginData.notifications || []);
 
     setIsSocketAuthed(false);
     setSelectedChatKind('direct');
     setSelectedUserId('');
     setSelectedGroupId('');
+    setActiveSidebarTab('chats');
+    setNotifications([]);
+    setUnreadNotificationCount(0);
   
     socketRef.current?.disconnect();
   
@@ -1087,6 +1200,7 @@ export default function App() {
         setIdleUserIds(payload.idleUserIds || []);
         setActiveChatTargets(payload.activeChatTargets || {});
         setHasExplicitContactSelection(false);
+        setNotifications(payload.notifications || []);
   
         const historyMap = await loadAllHistories(
           payload.users || [],
@@ -1135,6 +1249,9 @@ export default function App() {
       setMe(null);
       meRef.current = null;
       setAuthToken('');
+      setNotifications([]);
+      setUnreadNotificationCount(0);
+      setActiveSidebarTab('chats');
     });
   
     socket.on(
@@ -1254,12 +1371,40 @@ export default function App() {
     });
   
     socket.on(
+      'group:read:update',
+      ({
+        groupId,
+        userId,
+        messageIds
+      }: {
+        groupId: string;
+        userId: string;
+        messageIds: string[];
+      }) => {
+        applyGroupReadUpdate(groupId, userId, messageIds);
+      }
+    );
+
+    socket.on(
       'presence:update',
       (payload: { onlineUserIds: string[]; idleUserIds: string[] }) => {
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
       }
     );
+    
+    socket.on('notification:user-presence', (item: AppNotification) => {
+      if (item.userId === loginData.user.id) return;
+    
+      setNotifications((prev) => [item, ...prev].slice(0, 200));
+    
+      playPresenceNotificationSound();
+      showToast(presenceNotificationText(item), 'info', 3200);
+    
+      if (activeSidebarTabRef.current !== 'notifications') {
+        setUnreadNotificationCount((prev) => prev + 1);
+      }
+    });
   
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -1269,6 +1414,17 @@ export default function App() {
         const next = [...(prev[key] || []), message];
         return { ...prev, [key]: next };
       });
+
+      if (
+        message.groupId &&
+        message.fromUserId !== loginData.user.id &&
+        selectedChatKindRef.current === 'group' &&
+        selectedGroupIdRef.current === message.groupId &&
+        isWindowActiveRef.current &&
+        isMessagesNearBottom()
+      ) {
+        markUnreadGroupMessagesAsRead(message.groupId, [...activeMessagesRef.current, message]);
+      }
   
       const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
 
@@ -1515,6 +1671,35 @@ export default function App() {
         }
       }
     );
+  }
+
+  async function handleLogout() {
+    setSidebarMenuOpen(false);
+  
+    try {
+      await flushCurrentGroupReadBeforeLogout();
+    } catch {}
+  
+    try {
+      await apiFetch('/api/logout', { method: 'POST' });
+    } catch {}
+  
+    cleanupCall(true);
+    socketRef.current?.disconnect();
+    localStorage.removeItem('lan_chat_auth_token');
+    meRef.current = null;
+    setActiveChatTargets({});
+    setHasExplicitContactSelection(false);
+    setMessagesByConv({});
+    setNotifications([]);
+    setUnreadNotificationCount(0);
+    setActiveSidebarTab('chats');
+    setMe(null);
+    setAuthToken('');
+    setIsSocketAuthed(false);
+    setSelectedUserId('');
+    setSelectedGroupId('');
+    setSelectedChatKind('direct');
   }
 
   function getRenderableUser(userId: string): User {
@@ -1810,6 +1995,111 @@ export default function App() {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
+  }
+
+  function getUnreadIncomingGroupMessages(groupId: string, sourceMessages: Message[]) {
+    if (!me) return [];
+  
+    return sourceMessages.filter(
+      (m) =>
+        m.groupId === groupId &&
+        m.fromUserId !== me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !(m.groupReadByUserIds || []).includes(me.id)
+    );
+  }
+  
+  function applyGroupReadUpdate(groupId: string, userId: string, messageIds: string[]) {
+    if (!messageIds.length) return;
+  
+    setMessagesByConv((prev) => {
+      const key = groupConversationKey(groupId);
+      const current = prev[key] || [];
+  
+      return {
+        ...prev,
+        [key]: current.map((m) =>
+          messageIds.includes(m.id)
+            ? {
+                ...m,
+                groupReadByUserIds: Array.from(
+                  new Set([...(m.groupReadByUserIds || []), userId])
+                )
+              }
+            : m
+        )
+      };
+    });
+  }
+    
+  function markUnreadGroupMessagesAsRead(groupId: string, sourceMessages: Message[]) {
+    if (!socketRef.current || !me) return;
+    if (!isWindowActiveRef.current || !isMessagesNearBottom()) return;
+  
+    const unreadMessages = getUnreadIncomingGroupMessages(groupId, sourceMessages);
+    if (!unreadMessages.length) return;
+  
+    const messageIds = unreadMessages.map((m) => m.id);
+  
+    socketRef.current.emit(
+      'group:read',
+      { groupId, messageIds },
+      (result: { ok?: boolean; error?: string; messageIds?: string[] }) => {
+        if (!result?.ok) return;
+  
+        const confirmedIds =
+          result.messageIds && result.messageIds.length > 0
+            ? result.messageIds
+            : messageIds;
+  
+        applyGroupReadUpdate(groupId, me.id, confirmedIds);
+      }
+    );
+  }
+
+  async function flushCurrentGroupReadBeforeLogout() {
+    if (
+      !socketRef.current ||
+      !meRef.current ||
+      selectedChatKindRef.current !== 'group' ||
+      !selectedGroupIdRef.current ||
+      !isMessagesNearBottom()
+    ) {
+      return;
+    }
+  
+    const unreadMessages = getUnreadIncomingGroupMessages(
+      selectedGroupIdRef.current,
+      activeMessagesRef.current
+    );
+  
+    if (!unreadMessages.length) return;
+  
+    await new Promise<void>((resolve) => {
+      socketRef.current?.emit(
+        'group:read',
+        {
+          groupId: selectedGroupIdRef.current,
+          messageIds: unreadMessages.map((m) => m.id)
+        },
+        (result: { ok?: boolean; messageIds?: string[] }) => {
+          if (result?.ok) {
+            const confirmedIds =
+              result.messageIds && result.messageIds.length > 0
+                ? result.messageIds
+                : unreadMessages.map((m) => m.id);
+  
+            applyGroupReadUpdate(
+              selectedGroupIdRef.current,
+              meRef.current!.id,
+              confirmedIds
+            );
+          }
+  
+          resolve();
+        }
+      );
+    });
   }
 
   function updateMessageScrollbar() {
@@ -2518,6 +2808,23 @@ export default function App() {
     });
   }
 
+  async function clearNotifications() {
+    const res = await apiFetch('/api/notifications/clear', {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to clear notifications');
+      return;
+    }
+  
+    setNotifications([]);
+    setUnreadNotificationCount(0);
+    showSuccess('Notifications cleared');
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
   }
@@ -2774,9 +3081,33 @@ export default function App() {
 
   function handleMessagesScroll() {
     syncMessageViewportState();
-
+  
+    if (selectedChatKindRef.current === 'group') {
+      const groupId = selectedGroupIdRef.current;
+      if (!groupId) return;
+    
+      const nearBottom = isMessagesNearBottom();
+    
+      if (suppressAutoReadUntilBottomRef.current) {
+        if (!hasUserScrolledCurrentChatRef.current) return;
+        if (!nearBottom) return;
+    
+        suppressAutoReadUntilBottomRef.current = false;
+        autoScrollRef.current = true;
+        markUnreadGroupMessagesAsRead(groupId, activeMessagesRef.current);
+        return;
+      }
+    
+      if (nearBottom) {
+        autoScrollRef.current = true;
+        markUnreadGroupMessagesAsRead(groupId, activeMessagesRef.current);
+      }
+    
+      return;
+    }
+  
     if (selectedChatKindRef.current !== 'direct') return;
-
+  
     const peerUserId = selectedUserIdRef.current;
     if (!peerUserId) return;
   
@@ -2966,51 +3297,6 @@ export default function App() {
     }, 1200);
   }
 
-  const visibleUsers = useMemo(() => {
-    if (!me) return [] as User[];
-
-    const filtered = users.filter((u) => u.id !== me.id && u.name.toLowerCase().includes(search.toLowerCase()));
-
-    return filtered.sort((a, b) => {
-      const aMsgs = messagesByConv[conversationKey(me.id, a.id)] || [];
-      const bMsgs = messagesByConv[conversationKey(me.id, b.id)] || [];
-      const aLast = aMsgs.length ? aMsgs[aMsgs.length - 1].createdAt : 0;
-      const bLast = bMsgs.length ? bMsgs[bMsgs.length - 1].createdAt : 0;
-      return bLast - aLast || a.name.localeCompare(b.name);
-    });
-  }, [users, me, search, messagesByConv]);
-
-  const groupedContacts = useMemo(() => {
-    const onlineSet = new Set(onlineUserIds);
-    const idleSet = new Set(idleUserIds);
-  
-    const getLastTime = (userId: string) => {
-      const conv = messagesByConv[conversationKey(me!.id, userId)] || [];
-      return conv.length ? conv[conv.length - 1].createdAt : 0;
-    };
-  
-    const sortByRecent = (a: User, b: User) => {
-      const diff = getLastTime(b.id) - getLastTime(a.id);
-      return diff || a.name.localeCompare(b.name);
-    };
-  
-    const online: User[] = [];
-    const offline: User[] = [];
-  
-    for (const user of visibleUsers) {
-      if (onlineSet.has(user.id) || idleSet.has(user.id)) {
-        online.push(user);
-      } else {
-        offline.push(user);
-      }
-    }
-  
-    online.sort(sortByRecent);
-    offline.sort(sortByRecent);
-  
-    return { online, offline };
-  }, [visibleUsers, onlineUserIds, idleUserIds, messagesByConv, me]);
-
   const selectedUser =
   selectedChatKind === 'direct'
     ? users.find((u) => u.id === selectedUserId) || null
@@ -3037,10 +3323,36 @@ export default function App() {
   
     return result;
   }, [messagesByConv, users, me]);
+
+  const unreadCountByGroup = useMemo(() => {
+    if (!me) return {} as Record<string, number>;
+  
+    const result: Record<string, number> = {};
+  
+    for (const group of groups) {
+      const conv = messagesByConv[groupConversationKey(group.id)] || [];
+  
+      result[group.id] = conv.filter(
+        (m) =>
+          m.groupId === group.id &&
+          m.fromUserId !== me.id &&
+          isUnreadAffectingMessage(m, me.id) &&
+          !(m.groupReadByUserIds || []).includes(me.id)
+      ).length;
+    }
+  
+    return result;
+  }, [groups, messagesByConv, me]);
   
   const totalUnreadCount = useMemo(() => {
-    return Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
-  }, [unreadCountByUser]);
+    const directTotal = Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
+    const groupTotal = Object.values(unreadCountByGroup).reduce((sum, count) => sum + count, 0);
+    return directTotal + groupTotal;
+  }, [unreadCountByUser, unreadCountByGroup]);
+
+  const totalAppBadgeCount = useMemo(() => {
+    return totalUnreadCount + unreadNotificationCount;
+  }, [totalUnreadCount, unreadNotificationCount]);
   
   const activeMessages = useMemo(() => {
     if (!me) return [] as Message[];
@@ -3055,8 +3367,7 @@ export default function App() {
         : '';
   
     return key ? messagesByConv[key] || [] : [];
-  }, [messagesByConv, me, selectedChatKind, selectedUserId, selectedGroupId]);
-  
+  }, [messagesByConv, me, selectedChatKind, selectedUserId, selectedGroupId]);  
 
   const firstUnreadMessageId = useMemo(() => {
     if (!me || selectedChatKind !== 'direct' || !selectedUserId) return null;
@@ -3073,13 +3384,81 @@ export default function App() {
     return firstUnread?.id || null;
   }, [activeMessages, me, selectedChatKind, selectedUserId]);
 
+  const firstUnreadGroupMessageId = useMemo(() => {
+    if (!me || selectedChatKind !== 'group' || !selectedGroupId) return null;
+  
+    const firstUnread = activeMessages.find(
+      (m) =>
+        m.groupId === selectedGroupId &&
+        m.fromUserId !== me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !(m.groupReadByUserIds || []).includes(me.id)
+    );
+  
+    return firstUnread?.id || null;
+  }, [activeMessages, me, selectedChatKind, selectedGroupId]);
+
   const deleteMessageTarget = useMemo(() => {
     if (!deleteMessageTargetId) return null;
     return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
   }, [deleteMessageTargetId, activeMessages]);
+
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
   }, [activeMessages]);  
+
+  useEffect(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return;
+  
+    requestAnimationFrame(() => {
+      if (firstUnreadGroupMessageId) {
+        suppressAutoReadUntilBottomRef.current = true;
+        hasUserScrolledCurrentChatRef.current = false;
+  
+        const targetEl = document.querySelector(
+          `[data-message-id="${firstUnreadGroupMessageId}"]`
+        ) as HTMLElement | null;
+  
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+          autoScrollRef.current = false;
+          syncMessageViewportState();
+  
+          requestAnimationFrame(() => {
+            const messagesEl = messagesRef.current;
+            if (!messagesEl) return;
+  
+            const hasScrollableArea =
+              messagesEl.scrollHeight > messagesEl.clientHeight + 1;
+  
+            if (!hasScrollableArea) {
+              suppressAutoReadUntilBottomRef.current = false;
+              hasUserScrolledCurrentChatRef.current = true;
+              autoScrollRef.current = true;
+  
+              markUnreadGroupMessagesAsRead(selectedGroupId, activeMessagesRef.current);
+              syncMessageViewportState();
+            }
+          });
+  
+          return;
+        }
+      }
+  
+      suppressAutoReadUntilBottomRef.current = false;
+      smoothScrollToBottom(true, false);
+    });
+  }, [selectedGroupId, selectedChatKind, firstUnreadGroupMessageId]);
+  
+  useEffect(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return;
+  
+    requestAnimationFrame(() => {
+      if (autoScrollRef.current && !suppressAutoReadUntilBottomRef.current) {
+        markUnreadGroupMessagesAsRead(selectedGroupId, activeMessagesRef.current);
+      }
+    });
+  }, [selectedChatKind, selectedGroupId, activeMessages.length]);
 
   const contextTargetMessage = useMemo(() => {
     if (!contextMenu) return null;
@@ -3088,28 +3467,13 @@ export default function App() {
 
   const selectedGroup = useMemo(() => {
     return groups.find((g) => g.id === selectedGroupId) || null;
-  }, [groups, selectedGroupId]);
-  
+  }, [groups, selectedGroupId]);  
   
   const activeGroupTypingUsers = useMemo(() => {
     if (selectedChatKind !== 'group' || !selectedGroupId) return [] as string[];
     return groupTypingByChat[groupConversationKey(selectedGroupId)] || [];
   }, [groupTypingByChat, selectedChatKind, selectedGroupId]);
   
-  const visibleGroups = useMemo(() => {
-    const q = search.trim().toLowerCase();
-  
-    return groups
-      .filter((group) => !q || group.title.toLowerCase().includes(q))
-      .sort((a, b) => {
-        const aMsgs = messagesByConv[groupConversationKey(a.id)] || [];
-        const bMsgs = messagesByConv[groupConversationKey(b.id)] || [];
-        const aLast = aMsgs.length ? aMsgs[aMsgs.length - 1].createdAt : 0;
-        const bLast = bMsgs.length ? bMsgs[bMsgs.length - 1].createdAt : 0;
-        return bLast - aLast || a.title.localeCompare(b.title);
-      });
-  }, [groups, search, messagesByConv]);
-
   const directHeaderTypingText = useMemo(() => {
     if (selectedChatKind !== 'direct' || !selectedUser) return '';
     return typingFrom[selectedUser.id] ? 'typing...' : '';
@@ -3149,11 +3513,77 @@ export default function App() {
     }
   }, [selectedUserId, selectedGroupId, selectedChatKind]);
 
-  // useEffect(() => {
-  //   requestAnimationFrame(() => {
-  //     syncMessageViewportState();
-  //   });
-  // }, [activeMessages]);
+  const chatListItems = useMemo(() => {
+    if (!me) return [] as ContactListItem[];
+  
+    const q = search.trim().toLowerCase();
+  
+    const groupItems: ContactListItem[] = groups
+      .filter((group) => !q || group.title.toLowerCase().includes(q))
+      .map((group) => {
+        const conv = messagesByConv[groupConversationKey(group.id)] || [];
+        const last = conv[conv.length - 1];
+        const typingUsers = groupTypingByChat[groupConversationKey(group.id)] || [];
+  
+        return {
+          kind: 'group',
+          id: group.id,
+          title: group.title,
+          group,
+          last,
+          unreadCount: unreadCountByGroup[group.id] || 0,
+          typingText: groupTypingText(typingUsers, users),
+          sortAt: last?.createdAt || group.updatedAt || group.createdAt || 0
+        };
+      });
+  
+    const directItems: ContactListItem[] = users
+      .filter((user) => user.id !== me.id)
+      .filter(
+        (user) =>
+          !q ||
+          user.name.toLowerCase().includes(q) ||
+          user.userId.toLowerCase().includes(q)
+      )
+      .map((user) => {
+        const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+        const last = conv[conv.length - 1];
+        const presence = getPresence(user.id);
+  
+        return {
+          kind: 'direct',
+          id: user.id,
+          title: user.name,
+          user,
+          last,
+          unreadCount: unreadCountByUser[user.id] || 0,
+          typingText: typingFrom[user.id] ? 'typing...' : '',
+          presence,
+          selectedTogether:
+            (presence === 'online' || presence === 'idle') &&
+            isSelectedTogether(user.id),
+          sortAt: last?.createdAt || user.createdAt || 0
+        };
+      });
+  
+    return [...groupItems, ...directItems].sort((a, b) => {
+      if (b.sortAt !== a.sortAt) return b.sortAt - a.sortAt;
+      return a.title.localeCompare(b.title);
+    });
+  }, [
+    me,
+    search,
+    groups,
+    users,
+    messagesByConv,
+    groupTypingByChat,
+    unreadCountByGroup,
+    unreadCountByUser,
+    typingFrom,
+    onlineUserIds,
+    idleUserIds,
+    activeChatTargets
+  ]);
 
   useEffect(() => {
     if (selectedChatKind !== 'direct' || !selectedUserId) return;
@@ -3200,7 +3630,7 @@ export default function App() {
   
   useEffect(() => {
     if (selectedChatKind === 'group') {
-      if (autoScrollRef.current) {
+      if (autoScrollRef.current || !firstUnreadGroupMessageId) {
         smoothScrollToBottom(false, false);
       }
       return;
@@ -3211,16 +3641,23 @@ export default function App() {
     if (autoScrollRef.current || !firstUnreadMessageId) {
       smoothScrollToBottom(false, false);
     }
-  }, [activeMessages.length, selectedUserId, selectedGroupId, selectedChatKind, firstUnreadMessageId]);
+  }, [
+    activeMessages.length,
+    selectedUserId,
+    selectedGroupId,
+    selectedChatKind,
+    firstUnreadMessageId,
+    firstUnreadGroupMessageId
+  ]);
 
   useEffect(() => {
     const baseTitle = 'LAN Chat';
   
     document.title =
-      totalUnreadCount > 0 ? `(${totalUnreadCount}) ${baseTitle}` : baseTitle;
+      totalAppBadgeCount > 0 ? `(${totalAppBadgeCount}) ${baseTitle}` : baseTitle;
   
-    void desktopApi.setBadgeCount?.(totalUnreadCount);
-  }, [totalUnreadCount]);
+    void desktopApi.setBadgeCount?.(totalAppBadgeCount);
+  }, [totalAppBadgeCount]);
 
   useEffect(() => {
     const onResize = () => updateMessageScrollbar();
@@ -3335,54 +3772,74 @@ export default function App() {
         <div className="sidebar-top">
           <div className="profile-card">
             <UserAvatar user={me} serverUrl={connectedServerUrl} />
-            <div>
+            <div className="profile-meta">
               <div className="name">{me.userId}</div>
               <div className="sub">{me.name}</div>
             </div>
           </div>
 
-          <div className="header-actions">
-            <button className="icon-btn" onClick={() => setProfileOpen(true)} title="Profile">
-              ⚙
-            </button>
-
-            <button
-              className="icon-btn"
-              onClick={() => setGroupCreateOpen(true)}
-              title="Create group"
-            >
-              ＋
-            </button>
-
-            {me.role === 'admin' ? (
-              <button className="icon-btn" onClick={() => {
-                loadAdminUsers()
-                setAdminOpen(true)
-                }} title="Admin users">
-                🛡
+          <div className="sidebar-top-actions">
+            <div className="top-actions-menu-wrap" ref={sidebarMenuRef}>
+              <button
+                className={`icon-btn ${sidebarMenuOpen ? 'active' : ''}`}
+                onClick={() => setSidebarMenuOpen((prev) => !prev)}
+                title="Options"
+                aria-label="Options"
+              >
+                ⋮
               </button>
-            ) : null}
+
+              {sidebarMenuOpen ? (
+                <div
+                  className="top-actions-popup"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <button
+                    className="top-actions-popup-item"
+                    onClick={() => {
+                      setSidebarMenuOpen(false);
+                      setProfileOpen(true);
+                    }}
+                  >
+                    <span className="top-actions-popup-icon">⚙</span>
+                    <span>Profile</span>
+                  </button>
+
+                  <button
+                    className="top-actions-popup-item"
+                    onClick={() => {
+                      setSidebarMenuOpen(false);
+                      setGroupCreateOpen(true);
+                    }}
+                  >
+                    <span className="top-actions-popup-icon">＋</span>
+                    <span>Create group</span>
+                  </button>
+
+                  {me.role === 'admin' ? (
+                    <button
+                      className="top-actions-popup-item"
+                      onClick={() => {
+                        setSidebarMenuOpen(false);
+                        loadAdminUsers();
+                        setAdminOpen(true);
+                      }}
+                    >
+                      <span className="top-actions-popup-icon">🛡</span>
+                      <span>Admin users</span>
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
 
             <button
               className="icon-btn"
-              onClick={async () => {
-                try {
-                  await apiFetch('/api/logout', { method: 'POST' });
-                } catch {}
-                cleanupCall(true);
-                socketRef.current?.disconnect();
-                localStorage.removeItem('lan_chat_auth_token');
-                meRef.current = null;
-                setActiveChatTargets({});
-                setHasExplicitContactSelection(false);
-                setMe(null);
-                setAuthToken('');
-                setIsSocketAuthed(false);
-                setSelectedUserId('');
-                setSelectedGroupId('');
-                setSelectedChatKind('direct');
+              onClick={() => {
+                void handleLogout();
               }}
               title="Logout"
+              aria-label="Logout"
             >
               ⎋
             </button>
@@ -3408,20 +3865,22 @@ export default function App() {
           >
             Calls
           </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'notifications' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('notifications')}
+          >
+            Notifications{unreadNotificationCount > 0 ? ` (${unreadNotificationCount})` : ''}
+          </button>
         </div>
 
         <div className="contact-list">
           {activeSidebarTab === 'chats' ? (
-            <>
-              {visibleGroups.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title">Groups</div>
-
-                  {visibleGroups.map((group) => {
-                    const conv = messagesByConv[groupConversationKey(group.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const groupTypingUsers = groupTypingByChat[groupConversationKey(group.id)] || [];
-                    const groupPreviewTypingText = groupTypingText(groupTypingUsers, users);
+            chatListItems.length ? (
+              <div className="contact-group">
+                {chatListItems.map((item) => {
+                  if (item.kind === 'group') {
+                    const { group, last, unreadCount, typingText } = item;
 
                     return (
                       <button
@@ -3449,12 +3908,18 @@ export default function App() {
 
                             <div className="contact-head-right">
                               <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
                             </div>
                           </div>
 
                           <div className="contact-preview">
-                            {groupPreviewTypingText
-                              ? groupPreviewTypingText
+                            {typingText
+                              ? typingText
                               : last
                               ? previewText(last, me.id, users)
                               : `${group.memberIds.length} members`}
@@ -3462,117 +3927,56 @@ export default function App() {
                         </div>
                       </button>
                     );
-                  })}
-                </div>
-              ) : null}
-              {groupedContacts.online.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title">Online</div>
+                  }
 
-                  {groupedContacts.online.map((user) => {
-                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const presence = getPresence(user.id);
-                    const unreadCount = unreadCountByUser[user.id] || 0;
-                    const selectedTogether =
-                      (presence === 'online' || presence === 'idle') &&
-                      isSelectedTogether(user.id);
+                  const { user, last, unreadCount, typingText, presence, selectedTogether } = item;
 
-                    return (
-                      <button
-                        key={user.id}
-                        className={`contact-card ${
-                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
-                        }`}
-                        onClick={() => handleSelectContact(user.id)}
-                      >
-                        <div className="contact-avatar-wrap">
-                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                  return (
+                    <button
+                      key={user.id}
+                      className={`contact-card ${presence === 'offline' ? 'offline' : ''} ${
+                        selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
+                      }`}
+                      onClick={() => handleSelectContact(user.id)}
+                    >
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        {presence !== 'offline' ? (
                           <span
-                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${
+                              selectedTogether ? 'selected-together' : ''
+                            }`}
                           />
-                        </div>
+                        ) : null}
+                      </div>
 
-                        <div className="contact-text">
-                          <div className="contact-head">
-                            <span className="contact-name">{user.name}</span>
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{user.name}</span>
 
-                            <div className="contact-head-right">
-                              <span className="contact-time">
-                                {timeLabel(last?.createdAt)}
+                          <div className="contact-head-right">
+                            <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                            {unreadCount > 0 ? (
+                              <span className="contact-badge below-time">
+                                {unreadCount > 99 ? '99+' : unreadCount}
                               </span>
-
-                              {unreadCount > 0 ? (
-                                <span className="contact-badge below-time">
-                                  {unreadCount > 99 ? '99+' : unreadCount}
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="contact-preview">
-                            {typingFrom[user.id]
-                              ? 'typing...'
-                              : previewText(last, me.id, users)}
+                            ) : null}
                           </div>
                         </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
 
-              {groupedContacts.offline.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title offline">Offline</div>
-
-                  {groupedContacts.offline.map((user) => {
-                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const unreadCount = unreadCountByUser[user.id] || 0;
-
-                    return (
-                      <button
-                        key={user.id}
-                        className={`contact-card offline ${
-                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
-                        }`}
-                        onClick={() => handleSelectContact(user.id)}
-                      >
-                        <div className="contact-avatar-wrap">
-                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        <div className="contact-preview">
+                          {typingText ? typingText : previewText(last, me.id, users)}
                         </div>
-
-                        <div className="contact-text">
-                          <div className="contact-head">
-                            <span className="contact-name">{user.name}</span>
-
-                            <div className="contact-head-right">
-                              <span className="contact-time">
-                                {timeLabel(last?.createdAt)}
-                              </span>
-
-                              {unreadCount > 0 ? (
-                                <span className="contact-badge below-time">
-                                  {unreadCount > 99 ? '99+' : unreadCount}
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="contact-preview">
-                            {typingFrom[user.id]
-                              ? 'typing...'
-                              : previewText(last, me.id, users)}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : (
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="admin-empty">No chats found.</div>
+            )
+          ) : activeSidebarTab === 'calls' ? (
             <div className="contact-group">
               <div className="contact-group-title">All Call History</div>
 
@@ -3624,6 +4028,69 @@ export default function App() {
                 <div className="admin-empty">No call history yet.</div>
               )}
             </div>
+          ) : (
+            <div className="contact-group">
+              <div
+                className="contact-group-title"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12
+                }}
+              >
+                <span>Notifications</span>
+
+                <button
+                  type="button"
+                  className="icon-btn small"
+                  onClick={() => {
+                    void clearNotifications();
+                  }}
+                  disabled={!notifications.length}
+                  title="Clear notifications"
+                >
+                  Clear
+                </button>
+              </div>
+
+              {notifications.length ? (
+                notifications.map((item) => {
+                  const matchedUser = users.find((u) => u.id === item.userId);
+
+                  return (
+                    <div key={item.id} className="contact-card">
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar
+                          user={{
+                            id: item.userId,
+                            userId: matchedUser?.userId || item.userName,
+                            name: matchedUser?.name || item.userName,
+                            avatarUrl: matchedUser?.avatarUrl || item.avatarUrl || null
+                          }}
+                          serverUrl={connectedServerUrl}
+                        />
+                      </div>
+
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{item.userName}</span>
+                          <div className="contact-head-right">
+                            <span className="contact-time">{timeLabel(item.createdAt)}</span>
+                          </div>
+                        </div>
+
+                        <div className="contact-preview">
+                          {item.kind === 'login' ? 'Logged in' : 'Logged out'}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="admin-empty">No notifications yet.</div>
+              )}
+            </div>
           )}
         </div>
       </aside>
@@ -3664,16 +4131,6 @@ export default function App() {
                         ) : null}
                       </div>
                     </div>
-                  </div>
-
-                  <div className="header-actions">
-                    <button
-                      className="icon-btn"
-                      onClick={() => setGroupCreateOpen(true)}
-                      title="Create group"
-                    >
-                      ＋
-                    </button>
                   </div>
                 </>
               ) : selectedUser ? (
@@ -3749,14 +4206,6 @@ export default function App() {
                     >
                       🗑
                     </button>
-
-                    <button
-                      className="icon-btn"
-                      onClick={() => setGroupCreateOpen(true)}
-                      title="Create group"
-                    >
-                      ＋
-                    </button>
                   </div>
                 </>
               ) : null}
@@ -3775,7 +4224,10 @@ export default function App() {
                   const mine = m.fromUserId === me.id;
                   const prev = activeMessages[idx - 1];
                   const next = activeMessages[idx + 1];
-                  const showUnreadDivider = !mine && firstUnreadMessageId === m.id;
+                  const showUnreadDivider =
+                    !mine &&
+                    ((selectedChatKind === 'direct' && firstUnreadMessageId === m.id) ||
+                      (selectedChatKind === 'group' && firstUnreadGroupMessageId === m.id));
 
                   const showDivider =
                     !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
@@ -3946,6 +4398,14 @@ export default function App() {
                   
                     requestAnimationFrame(() => {
                       requestAnimationFrame(() => {
+                        if (selectedChatKindRef.current === 'group' && selectedGroupIdRef.current) {
+                          markUnreadGroupMessagesAsRead(
+                            selectedGroupIdRef.current,
+                            activeMessagesRef.current
+                          );
+                          return;
+                        }
+                  
                         if (selectedUserIdRef.current) {
                           markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
                         }
