@@ -42,11 +42,22 @@ type AppToast = {
 
 type CallMode = 'audio' | 'video';
 
+type GroupChat = {
+  id: string;
+  title: string;
+  avatarUrl?: string | null;
+  ownerUserId?: string | null;
+  memberIds: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
 type Message = {
   id: string;
   conversationKey: string;
+  groupId: string | null;
   fromUserId: string;
-  toUserId: string;
+  toUserId: string | null;
   text: string;
   attachment: Attachment | null;
   attachments: Attachment[] | null;
@@ -72,6 +83,8 @@ type Message = {
   deliveredAt: number | null;
   readAt: number | null;
 };
+
+type SidebarTab = 'chats' | 'calls';
 
 type PendingUpload = {
   id: string;
@@ -111,6 +124,10 @@ function getInitials(name: string) {
 
 function conversationKey(a: string, b: string) {
   return [a, b].sort().join('__');
+}
+
+function groupConversationKey(groupId: string) {
+  return `group:${groupId}`;
 }
 
 function timeLabel(ts?: number | null) {
@@ -670,6 +687,19 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<null | { messageId: string; x: number; y: number }>(null);
   const [incomingCallMode, setIncomingCallMode] = useState<CallMode | null>(null);
   const incomingCallModeRef = useRef<CallMode | null>(null);
+  const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>('chats');
+
+  const [groups, setGroups] = useState<GroupChat[]>([]);
+  const [selectedChatKind, setSelectedChatKind] = useState<'direct' | 'group'>('direct');
+  const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [groupCreateOpen, setGroupCreateOpen] = useState(false);
+  const [groupTitle, setGroupTitle] = useState('');
+  const [groupMemberIds, setGroupMemberIds] = useState<string[]>([]);
+  const [groupTypingByChat, setGroupTypingByChat] = useState<Record<string, string[]>>({});
+
+  const groupsRef = useRef<GroupChat[]>([]);
+  const selectedGroupIdRef = useRef('');
+  const selectedChatKindRef = useRef<'direct' | 'group'>('direct');
 
   const usersRef = useRef<User[]>([]);
   const selectedUserIdRef = useRef('');
@@ -713,6 +743,7 @@ export default function App() {
   const hasUserScrolledCurrentChatRef = useRef(false);
   const [activeChatTargets, setActiveChatTargets] = useState<Record<string, string | null>>({});
   const [hasExplicitContactSelection, setHasExplicitContactSelection] = useState(false);
+  const [isSocketAuthed, setIsSocketAuthed] = useState(false);
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -736,6 +767,18 @@ export default function App() {
   useEffect(() => {
     usersRef.current = users;
   }, [users]);
+
+  useEffect(() => {
+    groupsRef.current = groups;
+  }, [groups]);
+  
+  useEffect(() => {
+    selectedGroupIdRef.current = selectedGroupId;
+  }, [selectedGroupId]);
+  
+  useEffect(() => {
+    selectedChatKindRef.current = selectedChatKind;
+  }, [selectedChatKind]);
 
   useEffect(() => {
     selectedUserIdRef.current = selectedUserId;
@@ -766,14 +809,18 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!socketRef.current || !me) return;
-  
+    if (!socketRef.current || !me || !isSocketAuthed) return;
+
     socketRef.current.emit('chat:selected-peer', {
       selectedPeerUserId:
-        isWindowActive && hasExplicitContactSelection ? selectedUserId || null : null,
+        isWindowActive &&
+        selectedChatKind === 'direct' &&
+        selectedUserId
+          ? selectedUserId
+          : null,
       isWindowActive
     });
-  }, [me, selectedUserId, isWindowActive, hasExplicitContactSelection]);
+  }, [me, isSocketAuthed, selectedUserId, selectedChatKind, isWindowActive]);
 
   useEffect(() => {
     return () => {
@@ -831,6 +878,8 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = desktopApi.onNavigateToChat?.(({ userId, kind }) => {
       autoScrollRef.current = true;
+      setSelectedChatKind('direct');
+      setSelectedGroupId('');
       setHasExplicitContactSelection(false);
       setSelectedUserId(userId);
 
@@ -942,7 +991,7 @@ export default function App() {
   
     suppressAutoReadUntilBottomRef.current = false;
     hasUserScrolledCurrentChatRef.current = false;
-  }, [selectedUserId]);
+  }, [selectedUserId, selectedGroupId, selectedChatKind]);
 
   async function handleRegister() {
     if (!loginUserId.trim()) {
@@ -1000,17 +1049,23 @@ export default function App() {
     }
   
     localStorage.setItem('lan_chat_auth_token', loginData.token);
-  
+
     setAuthToken(loginData.token);
     setConnectedServerUrl(FIXED_SERVER_URL);
     setMe(loginData.user);
     meRef.current = loginData.user;
     setUsers(loginData.users || []);
+    setGroups(loginData.groups || []);
     setOnlineUserIds(loginData.onlineUserIds || []);
     setIdleUserIds(loginData.idleUserIds || []);
     setProfileName(loginData.user.name || '');
     setActiveChatTargets(loginData.activeChatTargets || {});
     setHasExplicitContactSelection(false);
+
+    setIsSocketAuthed(false);
+    setSelectedChatKind('direct');
+    setSelectedUserId('');
+    setSelectedGroupId('');
   
     socketRef.current?.disconnect();
   
@@ -1024,19 +1079,44 @@ export default function App() {
           socket.disconnect();
           return;
         }
-  
+
+        setIsSocketAuthed(true);  
         setUsers(payload.users || []);
+        setGroups(payload.groups || []);
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
         setActiveChatTargets(payload.activeChatTargets || {});
         setHasExplicitContactSelection(false);
   
-        const fallback =
-          payload.users.find((u: User) => u.id !== loginData.user.id)?.id || '';
-  
-        setSelectedUserId((curr) => curr || fallback);
-  
-        await loadAllHistories(payload.users || [], loginData.token);
+        const historyMap = await loadAllHistories(
+          payload.users || [],
+          loginData.token,
+          payload.groups || []
+        );
+        
+        const preferredDirect = pickPreferredDirectUserId({
+          meId: loginData.user.id,
+          users: payload.users || [],
+          onlineUserIds: payload.onlineUserIds || [],
+          idleUserIds: payload.idleUserIds || [],
+          historyMap
+        });
+        
+        const fallbackGroup = payload.groups?.[0]?.id || '';
+        
+        if (preferredDirect) {
+          setSelectedChatKind('direct');
+          setSelectedGroupId('');
+          setSelectedUserId(preferredDirect);
+        } else if (fallbackGroup) {
+          setSelectedChatKind('group');
+          setSelectedUserId('');
+          setSelectedGroupId(fallbackGroup);
+        } else {
+          setSelectedChatKind('direct');
+          setSelectedUserId('');
+          setSelectedGroupId('');
+        }
   
         showSuccess(`Welcome, ${loginData.user.name || loginData.user.userId}!`);
       });
@@ -1048,6 +1128,10 @@ export default function App() {
       socket.disconnect();
       setActiveChatTargets({});
       setHasExplicitContactSelection(false);
+      setIsSocketAuthed(false);
+      setSelectedUserId('');
+      setSelectedGroupId('');
+      setSelectedChatKind('direct');
       setMe(null);
       meRef.current = null;
       setAuthToken('');
@@ -1130,21 +1214,41 @@ export default function App() {
           onlineUserIds: string[];
           idleUserIds: string[];
           activeChatTargets?: Record<string, string | null>;
+          groups?: GroupChat[];
         }) => {
           setUsers(payload.users || []);
+          setGroups(payload.groups || []);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
           setActiveChatTargets(payload.activeChatTargets || {});
   
-          const fallback =
-            payload.users.find((u: User) => u.id !== loginData.user.id)?.id || '';
-  
-          setSelectedUserId((curr) => {
-            const stillExists = payload.users.some((u: User) => u.id === curr);
-            return stillExists ? curr : fallback;
+          const historyMap = await loadAllHistories(
+            payload.users || [],
+            undefined,
+            payload.groups || []
+          );
+          
+          const fallbackDirect = pickPreferredDirectUserId({
+            meId: loginData.user.id,
+            users: payload.users || [],
+            onlineUserIds: payload.onlineUserIds || [],
+            idleUserIds: payload.idleUserIds || [],
+            historyMap
           });
-  
-          await loadAllHistories(payload.users || []);
+          
+          const fallbackGroup = payload.groups?.[0]?.id || '';
+          
+          setSelectedUserId((curr) => {
+            if (selectedChatKindRef.current !== 'direct') return curr;
+            const stillExists = payload.users.some((u: User) => u.id === curr);
+            return stillExists ? curr : fallbackDirect;
+          });
+          
+          setSelectedGroupId((curr) => {
+            if (selectedChatKindRef.current !== 'group') return curr;
+            const stillExists = (payload.groups || []).some((g: GroupChat) => g.id === curr);
+            return stillExists ? curr : fallbackGroup;
+          });
         }
       );
     });
@@ -1159,40 +1263,52 @@ export default function App() {
   
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
-        const key = message.conversationKey;
+        const key = message.groupId
+          ? groupConversationKey(message.groupId)
+          : message.conversationKey;
         const next = [...(prev[key] || []), message];
         return { ...prev, [key]: next };
       });
   
       const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
-  
+
       if (message.fromUserId !== loginData.user.id && isNormalNotifyMessage) {
         const senderName =
           usersRef.current.find((u) => u.id === message.fromUserId)?.name || 'New message';
         const attachments = getMessageAttachments(message);
-  
-        const body = isGalleryMessage(message)
+
+        const bodyText = isGalleryMessage(message)
           ? `${senderName} sent ${attachments.length} photos${message.text ? `: ${message.text}` : ''}`
           : message.type === 'file'
           ? `${senderName} sent ${attachments[0]?.isImage ? 'an image' : 'a file'}: ${attachments[0]?.filename || ''}`
           : message.text;
-  
-        desktopApi.notify({
-          title: senderName,
-          body,
-          userId: message.fromUserId,
-          kind: 'message'
-        });
+
+        if (message.groupId) {
+          const groupName =
+            groupsRef.current.find((g) => g.id === message.groupId)?.title || 'Group';
+
+          desktopApi.notify({
+            title: groupName,
+            body: `${senderName}: ${bodyText}`
+          });
+        } else {
+          desktopApi.notify({
+            title: senderName,
+            body: bodyText,
+            userId: message.fromUserId,
+            kind: 'message'
+          });
+        }
       }
-  
-      if (message.toUserId === loginData.user.id) {
+
+      if (!message.groupId && message.toUserId === loginData.user.id) {
         socket.emit('message:delivered', {
           messageId: message.id,
           byUserId: loginData.user.id
         });
-  
+
         const shouldAffectUnread = isUnreadAffectingMessage(message, loginData.user.id);
-  
+
         if (!shouldAffectUnread || canMarkConversationAsRead(message.fromUserId)) {
           socket.emit('message:read', {
             messageId: message.id,
@@ -1212,7 +1328,32 @@ export default function App() {
   
     socket.on(
       'typing:update',
-      ({ fromUserId, isTyping }: { fromUserId: string; isTyping: boolean }) => {
+      ({
+        fromUserId,
+        groupId,
+        isTyping
+      }: {
+        fromUserId: string;
+        groupId?: string | null;
+        isTyping: boolean;
+      }) => {
+        if (groupId) {
+          const key = groupConversationKey(groupId);
+    
+          setGroupTypingByChat((prev) => {
+            const existing = prev[key] || [];
+            const next = isTyping
+              ? existing.includes(fromUserId)
+                ? existing
+                : [...existing, fromUserId]
+              : existing.filter((id) => id !== fromUserId);
+    
+            return { ...prev, [key]: next };
+          });
+    
+          return;
+        }
+    
         setTypingFrom((prev) => ({ ...prev, [fromUserId]: isTyping }));
       }
     );
@@ -1391,6 +1532,9 @@ export default function App() {
   }
 
   function handleSelectContact(userId: string) {
+    stopTyping();
+    setSelectedChatKind('direct');
+    setSelectedGroupId('');
     setHasExplicitContactSelection(true);
     setSelectedUserId(userId);
   }
@@ -1406,6 +1550,29 @@ export default function App() {
       );
     });
   }, [adminUsers, adminSearch]);
+
+  const allCallHistory = useMemo(() => {
+    if (!me) return [] as Array<{
+      message: Message;
+      peerUserId: string;
+      peer: User | null;
+    }>;
+  
+    return Object.values(messagesByConv)
+      .flat()
+      .filter((message) => message.type === 'call')
+      .map((message) => {
+        const peerUserId =
+          message.fromUserId === me.id ? message.toUserId : message.fromUserId;
+  
+        return {
+          message,
+          peerUserId,
+          peer: users.find((u) => u.id === peerUserId) || null
+        };
+      })
+      .sort((a, b) => b.message.createdAt - a.message.createdAt);
+  }, [messagesByConv, users, me]);
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
@@ -1457,6 +1624,39 @@ export default function App() {
     return peer;
   }
 
+  function getGroupById(groupId: string) {
+    return groups.find((group) => group.id === groupId) || null;
+  }
+  
+  function getGroupDisplayName(groupId: string) {
+    return getGroupById(groupId)?.title || 'Group';
+  }
+  
+  function getSelectedMessagesKey() {
+    if (!me) return '';
+    if (selectedChatKind === 'group' && selectedGroupId) {
+      return groupConversationKey(selectedGroupId);
+    }
+    if (selectedChatKind === 'direct' && selectedUserId) {
+      return conversationKey(me.id, selectedUserId);
+    }
+    return '';
+  }
+  
+  function handleSelectGroup(groupId: string) {
+    stopTyping();
+    setSelectedChatKind('group');
+    setSelectedUserId('');
+    setSelectedGroupId(groupId);
+    setHasExplicitContactSelection(false);
+  }
+  
+  function toggleGroupMember(userId: string) {
+    setGroupMemberIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  }
+
   function isUserSelectingMe(userId: string) {
     return !!me && activeChatTargets[userId] === me.id;
   }
@@ -1491,7 +1691,7 @@ export default function App() {
   }
   
   function isMessageStatusVisible(message: Message) {
-    return message.type === 'text' || message.type === 'file' || message.type === 'gallery';
+    return !message.groupId && (message.type === 'text' || message.type === 'file' || message.type === 'gallery');
   }
 
   function guessMimeTypeFromName(fileName: string) {
@@ -1661,14 +1861,40 @@ export default function App() {
     }
   }
 
-  async function loadAllHistories(userList: User[], tokenOverride?: string) {
+  async function loadGroupHistory(groupId: string, forceScroll = false) {
+    if (!connectedServerUrl || !me || !groupId) return;
+  
+    const res = await apiFetch(`/api/groups/${groupId}/messages`);
+    const data = await res.json();
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to load group messages');
+      return;
+    }
+  
+    setMessagesByConv((prev) => ({
+      ...prev,
+      [groupConversationKey(groupId)]: data.messages || []
+    }));
+  
+    if (forceScroll) {
+      autoScrollRef.current = true;
+      smoothScrollToBottom(true, false);
+    }
+  }
+
+  async function loadAllHistories(
+    userList: User[],
+    tokenOverride?: string,
+    groupListOverride?: GroupChat[]
+  ) {
     const currentMe = meRef.current;
-    if (!currentMe) return;
+    if (!currentMe) return {} as Record<string, Message[]>;
   
     const peers = userList.filter((u) => u.id !== currentMe.id);
-    if (!peers.length) return;
+    const groupList = groupListOverride ?? groupsRef.current ?? [];
   
-    const entries = await Promise.all(
+    const directEntries = await Promise.all(
       peers.map(async (peer) => {
         try {
           const res = await apiFetch(
@@ -1689,10 +1915,34 @@ export default function App() {
       })
     );
   
+    const groupEntries = await Promise.all(
+      groupList.map(async (group) => {
+        try {
+          const res = await apiFetch(`/api/groups/${group.id}/messages`, {}, tokenOverride);
+          const data = await res.json().catch(() => ({}));
+  
+          if (!res.ok) {
+            return [groupConversationKey(group.id), []] as const;
+          }
+  
+          return [groupConversationKey(group.id), data.messages || []] as const;
+        } catch {
+          return [groupConversationKey(group.id), []] as const;
+        }
+      })
+    );
+  
+    const nextHistoryMap = Object.fromEntries([
+      ...directEntries,
+      ...groupEntries
+    ]) as Record<string, Message[]>;
+  
     setMessagesByConv((prev) => ({
       ...prev,
-      ...Object.fromEntries(entries)
+      ...nextHistoryMap
     }));
+  
+    return nextHistoryMap;
   }
 
   async function sendMessage() {
@@ -1701,7 +1951,10 @@ export default function App() {
       return;
     }
   
-    if (!socketRef.current || !me || !selectedUserId || !draft.trim()) return;
+    if (!socketRef.current || !me || !draft.trim()) return;
+  
+    if (selectedChatKind === 'direct' && !selectedUserId) return;
+    if (selectedChatKind === 'group' && !selectedGroupId) return;
   
     const text = draft.trim();
     setDraft('');
@@ -1710,12 +1963,15 @@ export default function App() {
   
     socketRef.current.emit('message:send', {
       fromUserId: me.id,
-      toUserId: selectedUserId,
+      toUserId: selectedChatKind === 'direct' ? selectedUserId : undefined,
+      groupId: selectedChatKind === 'group' ? selectedGroupId : undefined,
       text,
       replyToMessageId: replyingTo?.id || null
     });
-    
-    forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
+  
+    if (selectedChatKind === 'direct') {
+      forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
+    }
   
     setReplyingTo(null);
   
@@ -1728,7 +1984,9 @@ export default function App() {
   }
 
   async function sendAttachment() {
-    if (!me || !selectedUserId || !connectedServerUrl) return;
+    if (!me || !connectedServerUrl) return;
+    if (selectedChatKind === 'direct' && !selectedUserId) return;
+    if (selectedChatKind === 'group' && !selectedGroupId) return;
   
     const filePaths = await desktopApi.onOpenFileDialog();
     if (!filePaths?.length) return;
@@ -1814,27 +2072,51 @@ export default function App() {
   }
 
   function startTyping() {
-    if (!socketRef.current || !me || !selectedUserId) return;
-
-    socketRef.current.emit('typing:set', {
-      fromUserId: me.id,
-      toUserId: selectedUserId,
-      isTyping: true
-    });
-
+    if (!socketRef.current || !me) return;
+  
+    if (selectedChatKind === 'direct') {
+      if (!selectedUserId) return;
+  
+      socketRef.current.emit('typing:set', {
+        fromUserId: me.id,
+        toUserId: selectedUserId,
+        isTyping: true
+      });
+    } else {
+      if (!selectedGroupId) return;
+  
+      socketRef.current.emit('typing:set', {
+        fromUserId: me.id,
+        groupId: selectedGroupId,
+        isTyping: true
+      });
+    }
+  
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     typingTimerRef.current = window.setTimeout(() => stopTyping(), 1200);
   }
-
+  
   function stopTyping() {
-    if (!socketRef.current || !me || !selectedUserId) return;
-
-    socketRef.current.emit('typing:set', {
-      fromUserId: me.id,
-      toUserId: selectedUserId,
-      isTyping: false
-    });
-
+    if (!socketRef.current || !me) return;
+  
+    if (selectedChatKind === 'direct') {
+      if (!selectedUserId) return;
+  
+      socketRef.current.emit('typing:set', {
+        fromUserId: me.id,
+        toUserId: selectedUserId,
+        isTyping: false
+      });
+    } else {
+      if (!selectedGroupId) return;
+  
+      socketRef.current.emit('typing:set', {
+        fromUserId: me.id,
+        groupId: selectedGroupId,
+        isTyping: false
+      });
+    }
+  
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     typingTimerRef.current = null;
   }
@@ -1977,6 +2259,7 @@ export default function App() {
   function canMarkConversationAsRead(peerUserId: string) {
     return (
       !!me &&
+      selectedChatKind === 'direct' &&
       selectedUserIdRef.current === peerUserId &&
       isWindowActiveRef.current &&
       isMessagesNearBottom()
@@ -2244,7 +2527,9 @@ export default function App() {
   }
   
   async function uploadPreparedFiles(files: PendingUpload[]) {
-    if (!me || !selectedUserId || !connectedServerUrl) return false;
+    if (!me || !connectedServerUrl) return false;
+    if (selectedChatKind === 'direct' && !selectedUserId) return false;
+    if (selectedChatKind === 'group' && !selectedGroupId) return false;
     if (!files.length) return false;
   
     const textForMessage = draft.trim();
@@ -2262,7 +2547,11 @@ export default function App() {
       });
   
       form.append('fromUserId', me.id);
-      form.append('toUserId', selectedUserId);
+      if (selectedChatKind === 'group') {
+        form.append('groupId', selectedGroupId);
+      } else {
+        form.append('toUserId', selectedUserId);
+      }
       form.append('text', textForMessage);
   
       if (replyTarget?.id) {
@@ -2287,7 +2576,11 @@ export default function App() {
   
         form.append('file', item.file, item.fileName);
         form.append('fromUserId', me.id);
-        form.append('toUserId', selectedUserId);
+        if (selectedChatKind === 'group') {
+          form.append('groupId', selectedGroupId);
+        } else {
+          form.append('toUserId', selectedUserId);
+        }
         form.append('text', i === 0 ? textForMessage : '');
   
         if (i === 0 && replyTarget?.id) {
@@ -2308,7 +2601,9 @@ export default function App() {
       }
     }
 
-    forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
+    if (selectedChatKind === 'direct') {
+      forceMarkConversationAsRead(selectedUserId, activeMessagesRef.current);
+    }
   
     clearPendingUploads();
     setDraft('');
@@ -2393,8 +2688,27 @@ export default function App() {
   
     focusComposer();
   }
+
   function userNameFromList(userId: string, list: User[]) {
     return list.find((u) => u.id === userId)?.name || userId;
+  }
+
+  function groupTypingText(userIds: string[], users: User[]) {
+    const names = userIds
+      .map((id) => users.find((u) => u.id === id)?.name || id)
+      .filter(Boolean);
+  
+    if (!names.length) return '';
+  
+    if (names.length === 1) {
+      return `${names[0]} is typing...`;
+    }
+  
+    if (names.length === 2) {
+      return `${names[0]} and ${names[1]} are typing...`;
+    }
+  
+    return `${names[0]}, ${names[1]} and ${names.length - 2} others are typing...`;
   }
 
   function isMessagesNearBottom(threshold = 48) {
@@ -2460,7 +2774,9 @@ export default function App() {
 
   function handleMessagesScroll() {
     syncMessageViewportState();
-  
+
+    if (selectedChatKindRef.current !== 'direct') return;
+
     const peerUserId = selectedUserIdRef.current;
     if (!peerUserId) return;
   
@@ -2587,6 +2903,57 @@ export default function App() {
     return !!me && !!user && me.canVideoCall !== false && user.canVideoCall !== false;
   }
 
+  function getLastDirectMessageAt(
+    historyMap: Record<string, Message[]>,
+    meId: string,
+    peerUserId: string
+  ) {
+    const conv = historyMap[conversationKey(meId, peerUserId)] || [];
+    return conv.length ? conv[conv.length - 1].createdAt : 0;
+  }
+  
+  function pickPreferredDirectUserId(params: {
+    meId: string;
+    users: User[];
+    onlineUserIds: string[];
+    idleUserIds: string[];
+    historyMap: Record<string, Message[]>;
+  }) {
+    const { meId, users, onlineUserIds, idleUserIds, historyMap } = params;
+  
+    const peers = users.filter((u) => u.id !== meId);
+    if (!peers.length) return '';
+  
+    const onlineSet = new Set(onlineUserIds);
+    const idleSet = new Set(idleUserIds);
+  
+    function presenceRank(userId: string) {
+      if (onlineSet.has(userId)) return 0; // best
+      if (idleSet.has(userId)) return 1;
+      return 2; // offline
+    }
+  
+    const sorted = [...peers].sort((a, b) => {
+      const aPresence = presenceRank(a.id);
+      const bPresence = presenceRank(b.id);
+  
+      if (aPresence !== bPresence) {
+        return aPresence - bPresence;
+      }
+  
+      const aLast = getLastDirectMessageAt(historyMap, meId, a.id);
+      const bLast = getLastDirectMessageAt(historyMap, meId, b.id);
+  
+      if (aLast !== bLast) {
+        return bLast - aLast;
+      }
+  
+      return a.name.localeCompare(b.name);
+    });
+  
+    return sorted[0]?.id || '';
+  }
+
   function scrollToMessage(messageId: string) {
     const el = document.querySelector(`[data-message-id="${messageId}"]`) as HTMLElement | null;
     if (!el) return;
@@ -2644,12 +3011,10 @@ export default function App() {
     return { online, offline };
   }, [visibleUsers, onlineUserIds, idleUserIds, messagesByConv, me]);
 
-  const selectedUser = users.find((u) => u.id === selectedUserId) || null;
-
-  const activeMessages = useMemo(() => {
-    if (!me || !selectedUserId) return [] as Message[];
-    return messagesByConv[conversationKey(me.id, selectedUserId)] || [];
-  }, [messagesByConv, me, selectedUserId]);
+  const selectedUser =
+  selectedChatKind === 'direct'
+    ? users.find((u) => u.id === selectedUserId) || null
+    : null;
 
   const unreadCountByUser = useMemo(() => {
     if (!me) return {} as Record<string, number>;
@@ -2677,11 +3042,28 @@ export default function App() {
     return Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
   }, [unreadCountByUser]);
   
+  const activeMessages = useMemo(() => {
+    if (!me) return [] as Message[];
+  
+    const key =
+      selectedChatKind === 'group'
+        ? selectedGroupId
+          ? groupConversationKey(selectedGroupId)
+          : ''
+        : selectedUserId
+        ? conversationKey(me.id, selectedUserId)
+        : '';
+  
+    return key ? messagesByConv[key] || [] : [];
+  }, [messagesByConv, me, selectedChatKind, selectedUserId, selectedGroupId]);
+  
+
   const firstUnreadMessageId = useMemo(() => {
-    if (!me || !selectedUserId) return null;
+    if (!me || selectedChatKind !== 'direct' || !selectedUserId) return null;
   
     const firstUnread = activeMessages.find(
       (m) =>
+        !m.groupId &&
         m.fromUserId === selectedUserId &&
         m.toUserId === me.id &&
         isUnreadAffectingMessage(m, me.id) &&
@@ -2689,7 +3071,7 @@ export default function App() {
     );
   
     return firstUnread?.id || null;
-  }, [activeMessages, me, selectedUserId]);
+  }, [activeMessages, me, selectedChatKind, selectedUserId]);
 
   const deleteMessageTarget = useMemo(() => {
     if (!deleteMessageTargetId) return null;
@@ -2704,10 +3086,52 @@ export default function App() {
     return activeMessages.find((m) => m.id === contextMenu.messageId) || null;
   }, [contextMenu, activeMessages]);
 
+  const selectedGroup = useMemo(() => {
+    return groups.find((g) => g.id === selectedGroupId) || null;
+  }, [groups, selectedGroupId]);
+  
+  
+  const activeGroupTypingUsers = useMemo(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return [] as string[];
+    return groupTypingByChat[groupConversationKey(selectedGroupId)] || [];
+  }, [groupTypingByChat, selectedChatKind, selectedGroupId]);
+  
+  const visibleGroups = useMemo(() => {
+    const q = search.trim().toLowerCase();
+  
+    return groups
+      .filter((group) => !q || group.title.toLowerCase().includes(q))
+      .sort((a, b) => {
+        const aMsgs = messagesByConv[groupConversationKey(a.id)] || [];
+        const bMsgs = messagesByConv[groupConversationKey(b.id)] || [];
+        const aLast = aMsgs.length ? aMsgs[aMsgs.length - 1].createdAt : 0;
+        const bLast = bMsgs.length ? bMsgs[bMsgs.length - 1].createdAt : 0;
+        return bLast - aLast || a.title.localeCompare(b.title);
+      });
+  }, [groups, search, messagesByConv]);
+
+  const directHeaderTypingText = useMemo(() => {
+    if (selectedChatKind !== 'direct' || !selectedUser) return '';
+    return typingFrom[selectedUser.id] ? 'typing...' : '';
+  }, [selectedChatKind, selectedUser, typingFrom]);
+  
+  const groupHeaderTypingText = useMemo(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return '';
+    return groupTypingText(activeGroupTypingUsers, users);
+  }, [selectedChatKind, selectedGroupId, activeGroupTypingUsers, users]);
+
   useEffect(() => {
-    if (!connectedServerUrl || !me || !selectedUserId) return;
+    if (!connectedServerUrl || !me) return;
+  
+    if (selectedChatKind === 'group') {
+      if (!selectedGroupId) return;
+      void loadGroupHistory(selectedGroupId);
+      return;
+    }
+  
+    if (!selectedUserId) return;
     void loadHistory(selectedUserId);
-  }, [selectedUserId, me, connectedServerUrl]);
+  }, [selectedUserId, selectedGroupId, selectedChatKind, me, connectedServerUrl]);
 
   useEffect(() => {
     if (!replyingTo) return;
@@ -2715,9 +3139,15 @@ export default function App() {
   }, [replyingTo]);
 
   useEffect(() => {
-    if (!selectedUserId) return;
-    focusComposer();
-  }, [selectedUserId]);
+    if (selectedChatKind === 'group' && selectedGroupId) {
+      focusComposer();
+      return;
+    }
+  
+    if (selectedChatKind === 'direct' && selectedUserId) {
+      focusComposer();
+    }
+  }, [selectedUserId, selectedGroupId, selectedChatKind]);
 
   // useEffect(() => {
   //   requestAnimationFrame(() => {
@@ -2726,7 +3156,7 @@ export default function App() {
   // }, [activeMessages]);
 
   useEffect(() => {
-    if (!selectedUserId) return;
+    if (selectedChatKind !== 'direct' || !selectedUserId) return;
   
     requestAnimationFrame(() => {
       if (firstUnreadMessageId) {
@@ -2749,9 +3179,6 @@ export default function App() {
             const hasScrollableArea =
               messagesEl.scrollHeight > messagesEl.clientHeight + 1;
   
-            // Only auto-clear unread when the chat cannot scroll at all.
-            // For scrollable chats, keep the existing behavior:
-            // unread disappears only after the user reaches the bottom.
             if (!hasScrollableArea) {
               suppressAutoReadUntilBottomRef.current = false;
               hasUserScrolledCurrentChatRef.current = true;
@@ -2769,15 +3196,22 @@ export default function App() {
       suppressAutoReadUntilBottomRef.current = false;
       smoothScrollToBottom(true, false);
     });
-  }, [selectedUserId, firstUnreadMessageId]);
+  }, [selectedUserId, selectedChatKind, firstUnreadMessageId]);
   
   useEffect(() => {
+    if (selectedChatKind === 'group') {
+      if (autoScrollRef.current) {
+        smoothScrollToBottom(false, false);
+      }
+      return;
+    }
+  
     if (!selectedUserId) return;
   
     if (autoScrollRef.current || !firstUnreadMessageId) {
       smoothScrollToBottom(false, false);
     }
-  }, [activeMessages.length, selectedUserId, firstUnreadMessageId]);
+  }, [activeMessages.length, selectedUserId, selectedGroupId, selectedChatKind, firstUnreadMessageId]);
 
   useEffect(() => {
     const baseTitle = 'LAN Chat';
@@ -2912,6 +3346,14 @@ export default function App() {
               ⚙
             </button>
 
+            <button
+              className="icon-btn"
+              onClick={() => setGroupCreateOpen(true)}
+              title="Create group"
+            >
+              ＋
+            </button>
+
             {me.role === 'admin' ? (
               <button className="icon-btn" onClick={() => {
                 loadAdminUsers()
@@ -2935,6 +3377,10 @@ export default function App() {
                 setHasExplicitContactSelection(false);
                 setMe(null);
                 setAuthToken('');
+                setIsSocketAuthed(false);
+                setSelectedUserId('');
+                setSelectedGroupId('');
+                setSelectedChatKind('direct');
               }}
               title="Logout"
             >
@@ -2949,102 +3395,236 @@ export default function App() {
         </div>
 
         <div className="tabs">
-          <button className="tab active">Chats</button>
-          <button className="tab">Calls</button>
-          <button className="tab">Contacts</button>
-          <button className="tab">Notification</button>
+          <button
+            className={`tab ${activeSidebarTab === 'chats' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('chats')}
+          >
+            Chats
+          </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'calls' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('calls')}
+          >
+            Calls
+          </button>
         </div>
 
         <div className="contact-list">
-          {groupedContacts.online.length ? (
+          {activeSidebarTab === 'chats' ? (
+            <>
+              {visibleGroups.length ? (
+                <div className="contact-group">
+                  <div className="contact-group-title">Groups</div>
+
+                  {visibleGroups.map((group) => {
+                    const conv = messagesByConv[groupConversationKey(group.id)] || [];
+                    const last = conv[conv.length - 1];
+                    const groupTypingUsers = groupTypingByChat[groupConversationKey(group.id)] || [];
+                    const groupPreviewTypingText = groupTypingText(groupTypingUsers, users);
+
+                    return (
+                      <button
+                        key={group.id}
+                        className={`contact-card ${
+                          selectedChatKind === 'group' && selectedGroupId === group.id ? 'selected' : ''
+                        }`}
+                        onClick={() => handleSelectGroup(group.id)}
+                      >
+                        <div className="contact-avatar-wrap">
+                          <UserAvatar
+                            user={{
+                              id: group.id,
+                              userId: group.title,
+                              name: group.title,
+                              avatarUrl: group.avatarUrl || null
+                            }}
+                            serverUrl={connectedServerUrl}
+                          />
+                        </div>
+
+                        <div className="contact-text">
+                          <div className="contact-head">
+                            <span className="contact-name">{group.title}</span>
+
+                            <div className="contact-head-right">
+                              <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                            </div>
+                          </div>
+
+                          <div className="contact-preview">
+                            {groupPreviewTypingText
+                              ? groupPreviewTypingText
+                              : last
+                              ? previewText(last, me.id, users)
+                              : `${group.memberIds.length} members`}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {groupedContacts.online.length ? (
+                <div className="contact-group">
+                  <div className="contact-group-title">Online</div>
+
+                  {groupedContacts.online.map((user) => {
+                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                    const last = conv[conv.length - 1];
+                    const presence = getPresence(user.id);
+                    const unreadCount = unreadCountByUser[user.id] || 0;
+                    const selectedTogether =
+                      (presence === 'online' || presence === 'idle') &&
+                      isSelectedTogether(user.id);
+
+                    return (
+                      <button
+                        key={user.id}
+                        className={`contact-card ${
+                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
+                        }`}
+                        onClick={() => handleSelectContact(user.id)}
+                      >
+                        <div className="contact-avatar-wrap">
+                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                          <span
+                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                          />
+                        </div>
+
+                        <div className="contact-text">
+                          <div className="contact-head">
+                            <span className="contact-name">{user.name}</span>
+
+                            <div className="contact-head-right">
+                              <span className="contact-time">
+                                {timeLabel(last?.createdAt)}
+                              </span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="contact-preview">
+                            {typingFrom[user.id]
+                              ? 'typing...'
+                              : previewText(last, me.id, users)}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+
+              {groupedContacts.offline.length ? (
+                <div className="contact-group">
+                  <div className="contact-group-title offline">Offline</div>
+
+                  {groupedContacts.offline.map((user) => {
+                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+                    const last = conv[conv.length - 1];
+                    const unreadCount = unreadCountByUser[user.id] || 0;
+
+                    return (
+                      <button
+                        key={user.id}
+                        className={`contact-card offline ${
+                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
+                        }`}
+                        onClick={() => handleSelectContact(user.id)}
+                      >
+                        <div className="contact-avatar-wrap">
+                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        </div>
+
+                        <div className="contact-text">
+                          <div className="contact-head">
+                            <span className="contact-name">{user.name}</span>
+
+                            <div className="contact-head-right">
+                              <span className="contact-time">
+                                {timeLabel(last?.createdAt)}
+                              </span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="contact-preview">
+                            {typingFrom[user.id]
+                              ? 'typing...'
+                              : previewText(last, me.id, users)}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </>
+          ) : (
             <div className="contact-group">
-              <div className="contact-group-title">Online</div>
+              <div className="contact-group-title">All Call History</div>
 
-              {groupedContacts.online.map((user) => {
-                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                const last = conv[conv.length - 1];
-                const presence = getPresence(user.id);
-                const unreadCount = unreadCountByUser[user.id] || 0;
-                const selectedTogether = presence === 'online' && isSelectedTogether(user.id);
+              {allCallHistory.length ? (
+                allCallHistory.map(({ message, peerUserId, peer }) => {
+                  const displayName = peer?.name || userName(peerUserId);
+                  const isSelected = selectedChatKind === 'direct' && selectedUserId === peerUserId;
 
-                return (
-                  <button
-                    key={user.id}
-                    className={`contact-card ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => handleSelectContact(user.id)}
-                  >
-                    <div className="contact-avatar-wrap">
-                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
-                        <span
-                          className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                  return (
+                    <button
+                      key={message.id}
+                      className={`contact-card ${isSelected ? 'selected' : ''}`}
+                      onClick={() => {
+                        setActiveSidebarTab('chats');
+                        handleSelectContact(peerUserId);
+                      }}
+                    >
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar
+                          user={
+                            peer || {
+                              id: peerUserId,
+                              userId: peerUserId,
+                              name: displayName
+                            }
+                          }
+                          serverUrl={connectedServerUrl}
                         />
                       </div>
-                    <div className="contact-text">
-                      <div className="contact-head">
-                        <span className="contact-name">{user.name}</span>
 
-                        <div className="contact-head-right">
-                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-
-                          {unreadCount > 0 ? (
-                            <span className="contact-badge below-time">
-                              {unreadCount > 99 ? '99+' : unreadCount}
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{displayName}</span>
+                          <div className="contact-head-right">
+                            <span className="contact-time">
+                              {timeLabel(message.createdAt)}
                             </span>
-                          ) : null}
+                          </div>
+                        </div>
+
+                        <div className="contact-preview">
+                          {callHistoryLabel(message, me.id, users)}
                         </div>
                       </div>
-                      <div className="contact-preview">
-                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
+                    </button>
+                  );
+                })
+              ) : (
+                <div className="admin-empty">No call history yet.</div>
+              )}
             </div>
-          ) : null}
-
-          {groupedContacts.offline.length ? (
-            <div className="contact-group">
-              <div className="contact-group-title offline">Offline</div>
-
-              {groupedContacts.offline.map((user) => {
-                const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                const last = conv[conv.length - 1];
-                const unreadCount = unreadCountByUser[user.id] || 0;
-
-                return (
-                  <button
-                    key={user.id}
-                    className={`contact-card offline ${selectedUserId === user.id ? 'selected' : ''}`}
-                    onClick={() => handleSelectContact(user.id)}
-                  >
-                    <div className="contact-avatar-wrap">
-                      <UserAvatar user={user} serverUrl={connectedServerUrl} />
-                    </div>
-
-                    <div className="contact-text">
-                      <div className="contact-head">
-                        <span className="contact-name">{user.name}</span>
-
-                        <div className="contact-head-right">
-                          <span className="contact-time">{timeLabel(last?.createdAt)}</span>
-
-                          {unreadCount > 0 ? (
-                            <span className="contact-badge below-time">
-                              {unreadCount > 99 ? '99+' : unreadCount}
-                            </span>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="contact-preview">
-                        {typingFrom[user.id] ? 'typing...' : previewText(last, me.id, users)}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
+          )}
         </div>
       </aside>
 
@@ -3055,70 +3635,131 @@ export default function App() {
         onDragLeave={handleChatDragLeave}
         onDrop={handleChatDrop}
       >
-        {selectedUser ? (
+        {(selectedChatKind === 'group' ? selectedGroup : selectedUser) ? (
           <>
             <header className="chat-header">
-              <div className="chat-person">
-                <div className="contact-avatar-wrap">
-                  <UserAvatar user={selectedUser} serverUrl={connectedServerUrl} />
-                  {getPresence(selectedUser.id) !== 'offline' ? (
-                    <span
-                      className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''} ${
-                        getPresence(selectedUser.id) === 'online' && isSelectedTogether(selectedUser.id)
-                          ? 'selected-together'
-                          : ''
-                      }`}
-                    />
-                  ) : null}
-                </div>
-                <div>
-                  <div className="name">{selectedUser.name}</div>
-                  <div className="sub">
-                    {getPresence(selectedUser.id) === 'online'
-                      ? 'Online'
-                      : getPresence(selectedUser.id) === 'idle'
-                      ? 'Idle'
-                      : 'Offline'}
+              {selectedChatKind === 'group' && selectedGroup ? (
+                <>
+                  <div className="chat-person">
+                    <div className="contact-avatar-wrap">
+                      <UserAvatar
+                        user={{
+                          id: selectedGroup.id,
+                          userId: selectedGroup.title,
+                          name: selectedGroup.title,
+                          avatarUrl: selectedGroup.avatarUrl || null
+                        }}
+                        serverUrl={connectedServerUrl}
+                      />
+                    </div>
+                    <div>
+                      <div className="name">{selectedGroup.title}</div>
+                      <div className="sub">
+                        <span>{selectedGroup.memberIds.length} members</span>
+                        {groupHeaderTypingText ? (
+                          <>
+                            <span className="chat-sub-separator">·</span>
+                            <span className="chat-header-typing">{groupHeaderTypingText}</span>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
 
-              <div className="header-actions">
-                <button
-                  className="icon-btn"
-                  onClick={() => {
-                    if (!canUseAudioCallWith(selectedUser)) {
-                      showToast('Audio call is not allowed for this user.', 'error', 3200);
-                      return;
-                    }
-                    void startCall('audio');
-                  }}
-                  title="Audio call"
-                >
-                  📞
-                </button>
+                  <div className="header-actions">
+                    <button
+                      className="icon-btn"
+                      onClick={() => setGroupCreateOpen(true)}
+                      title="Create group"
+                    >
+                      ＋
+                    </button>
+                  </div>
+                </>
+              ) : selectedUser ? (
+                <>
+                  <div className="chat-person">
+                    <div className="contact-avatar-wrap">
+                      <UserAvatar user={selectedUser} serverUrl={connectedServerUrl} />
+                      {getPresence(selectedUser.id) !== 'offline' ? (
+                        <span
+                          className={`online-dot ${getPresence(selectedUser.id) === 'idle' ? 'idle' : ''} ${
+                            (getPresence(selectedUser.id) === 'online' || getPresence(selectedUser.id) === 'idle') &&
+                            isSelectedTogether(selectedUser.id)
+                              ? 'selected-together'
+                              : ''
+                          }`}
+                        />
+                      ) : null}
+                    </div>
+                    <div>
+                      <div className="name">{selectedUser.name}</div>
+                      <div className="sub">
+                        <span>
+                          {getPresence(selectedUser.id) === 'online'
+                            ? 'Online'
+                            : getPresence(selectedUser.id) === 'idle'
+                            ? 'Idle'
+                            : 'Offline'}
+                        </span>
 
-                <button
-                  className="icon-btn"
-                  onClick={() => {
-                    if (!canUseVideoCallWith(selectedUser)) {
-                      showToast('Video call is not allowed for this user.', 'error', 3200);
-                      return;
-                    }
-                    void startCall('video');
-                  }}
-                  title="Video call"
-                >
-                  🎥
-                </button>
-                <button
-                  className="icon-btn"
-                  onClick={() => setDeleteChatTargetUserId(selectedUser.id)}
-                  title="Delete chat"
-                >
-                  🗑
-                </button>
-              </div>
+                        {directHeaderTypingText ? (
+                          <>
+                            <span className="chat-sub-separator">·</span>
+                            <span className="chat-header-typing">{directHeaderTypingText}</span>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="header-actions">
+                    <button
+                      className="icon-btn"
+                      onClick={() => {
+                        if (!canUseAudioCallWith(selectedUser)) {
+                          showToast('Audio call is not allowed for this user.', 'error', 3200);
+                          return;
+                        }
+                        void startCall('audio');
+                      }}
+                      title="Audio call"
+                    >
+                      📞
+                    </button>
+
+                    <button
+                      className="icon-btn"
+                      onClick={() => {
+                        if (!canUseVideoCallWith(selectedUser)) {
+                          showToast('Video call is not allowed for this user.', 'error', 3200);
+                          return;
+                        }
+                        void startCall('video');
+                      }}
+                      title="Video call"
+                    >
+                      🎥
+                    </button>
+
+                    <button
+                      className="icon-btn"
+                      onClick={() => setDeleteChatTargetUserId(selectedUser.id)}
+                      title="Delete chat"
+                    >
+                      🗑
+                    </button>
+
+                    <button
+                      className="icon-btn"
+                      onClick={() => setGroupCreateOpen(true)}
+                      title="Create group"
+                    >
+                      ＋
+                    </button>
+                  </div>
+                </>
+              ) : null}
             </header>
 
             <div className="messages-wrap">
@@ -3199,6 +3840,11 @@ export default function App() {
 
                           <div className="message-stack">
                             <div className={`bubble ${mine ? 'mine' : ''} ${useTelegramInlineMeta ? 'telegram-inline-meta' : ''}`}>
+                              {selectedChatKind === 'group' && !mine ? (
+                                <div className="reply-preview-author" style={{ marginBottom: 6 }}>
+                                  {userName(m.fromUserId)}
+                                </div>
+                              ) : null}
                               {m.replyTo ? (
                                 <button
                                   type="button"
@@ -3277,8 +3923,6 @@ export default function App() {
                     </div>
                   );
                 })}
-
-                {typingFrom[selectedUser.id] ? <div className="typing">{selectedUser.name} is typing...</div> : null}
               </section>
 
               <div className="messages-scrollbar">
@@ -3745,6 +4389,126 @@ export default function App() {
 
             <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
               <button className="icon-btn wide" onClick={() => setAdminOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {groupCreateOpen ? (
+        <div className="call-overlay">
+          <div className="call-modal admin-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Create Group</div>
+                <div className="call-sub">Select members and create a new group chat</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <label className="field">
+                <span>Group name</span>
+                <input
+                  value={groupTitle}
+                  onChange={(e) => setGroupTitle(e.target.value)}
+                  placeholder="Team Chat"
+                />
+              </label>
+
+              <div className="contact-group-title" style={{ marginBottom: 12 }}>Members</div>
+
+              <div className="admin-user-list">
+                {users
+                  .filter((u) => u.id !== me.id)
+                  .map((user) => (
+                    <label
+                      key={user.id}
+                      className="admin-user-row"
+                      style={{ cursor: 'pointer' }}
+                    >
+                      <div className="admin-user-main">
+                        <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                        <div>
+                          <div className="contact-name">{user.name}</div>
+                          <div className="contact-preview">@{user.userId}</div>
+                        </div>
+                      </div>
+
+                      <input
+                        type="checkbox"
+                        checked={groupMemberIds.includes(user.id)}
+                        onChange={() => toggleGroupMember(user.id)}
+                      />
+                    </label>
+                  ))}
+              </div>
+
+              <div className="settings-actions">
+                <button
+                  className="primary"
+                  onClick={async () => {
+                    const res = await apiFetch('/api/groups', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        title: groupTitle,
+                        memberIds: groupMemberIds
+                      })
+                    });
+
+                    const data = await res.json();
+
+                    if (!res.ok) {
+                      showError(data.error || 'Failed to create group');
+                      return;
+                    }
+
+                    socketRef.current?.emit(
+                      'users:sync',
+                      async (payload: {
+                        users: User[];
+                        groups?: GroupChat[];
+                        onlineUserIds: string[];
+                        idleUserIds: string[];
+                        activeChatTargets?: Record<string, string | null>;
+                      }) => {
+                        setUsers(payload.users || []);
+                        setGroups(payload.groups || []);
+                        setOnlineUserIds(payload.onlineUserIds || []);
+                        setIdleUserIds(payload.idleUserIds || []);
+                        setActiveChatTargets(payload.activeChatTargets || {});
+
+                        await loadAllHistories(payload.users || [], undefined, payload.groups || []);
+                      }
+                    );
+
+                    setSelectedChatKind('group');
+                    setSelectedGroupId(data.group.id);
+                    setGroupCreateOpen(false);
+                    setGroupTitle('');
+                    setGroupMemberIds([]);
+                    showSuccess('Group created');
+
+                    requestAnimationFrame(() => {
+                      void loadGroupHistory(data.group.id, true);
+                    });
+                  }}
+                >
+                  Create group
+                </button>
+              </div>
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button
+                className="icon-btn wide"
+                onClick={() => {
+                  setGroupCreateOpen(false);
+                  setGroupTitle('');
+                  setGroupMemberIds([]);
+                }}
+              >
                 Close
               </button>
             </div>

@@ -160,24 +160,35 @@ button {
 }
 
 .tabs {
-  padding: 0 10px 12px;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
-  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .tab {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  padding: 10px 18px;
+  border: 0;
+  border-radius: 12px;
   background: transparent;
-  color: var(--muted);
-  border: none;
-  padding: 10px 6px 12px;
-  border-radius: 10px;
+  color: #8fb4ff;
+  cursor: pointer;
+}
+
+.tabs {
+  padding: 8px 10px;
+  gap: 8px;
 }
 
 .tab.active {
-  color: #dfe8ff;
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
 }
 
 .contact-card.selected,
@@ -2399,4 +2410,44 @@ button {
   background: #4ea4f6;
   box-shadow: 0 2px 8px rgba(78, 164, 246, 0.3);
   color: #fff;
+}
+
+.message-sender-name {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
+
+.chat-header .sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chat-sub-separator {
+  opacity: 0.55;
+}
+
+.chat-header-typing {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.chat-person .sub {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.chat-sub-separator {
+  opacity: 0.55;
+}
+
+.chat-header-typing {
+  padding-left: 2px;
+  white-space: nowrap;
 }
