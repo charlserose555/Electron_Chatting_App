@@ -2411,3 +2411,43 @@ button {
   box-shadow: 0 2px 8px rgba(78, 164, 246, 0.3);
   color: #fff;
 }
+
+.message-sender-name {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.9;
+  margin-bottom: 6px;
+}
+
+.chat-header .sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chat-sub-separator {
+  opacity: 0.55;
+}
+
+.chat-header-typing {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.chat-person .sub {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  column-gap: 8px;
+  row-gap: 2px;
+}
+
+.chat-sub-separator {
+  opacity: 0.55;
+}
+
+.chat-header-typing {
+  padding-left: 2px;
+  white-space: nowrap;
+}

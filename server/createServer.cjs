@@ -61,23 +61,37 @@ function createLanServer({ port = 4000, userDataPath }) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  function groupConversationKey(groupId) {
+    return `group:${groupId}`;
+  }
+
   function normalizeUserRecord(raw, index) {
-    const fallbackUserId = safeUserId(raw?.userId || raw?.name || raw?.id || `user${index + 1}`) || `user${index + 1}`;
-    const hasPasswordHash = typeof raw?.passwordHash === 'string' && raw.passwordHash.includes(':');
+    const fallbackUserId =
+      safeUserId(raw?.userId || raw?.name || raw?.id || `user${index + 1}`) ||
+      `user${index + 1}`;
+    const hasPasswordHash =
+      typeof raw?.passwordHash === 'string' && raw.passwordHash.includes(':');
 
     return {
       id: String(raw?.id || createId('u')),
       userId: fallbackUserId,
       name: safeDisplayName(raw?.name || fallbackUserId) || fallbackUserId,
-      passwordHash: hasPasswordHash ? raw.passwordHash : hashPassword(fallbackUserId),
+      passwordHash: hasPasswordHash
+        ? raw.passwordHash
+        : hashPassword(fallbackUserId),
       role: raw?.role === 'admin' ? 'admin' : 'user',
       avatarUrl: typeof raw?.avatarUrl === 'string' ? raw.avatarUrl : null,
-      isApproved: typeof raw?.isApproved === 'boolean' ? raw.isApproved : true,
+      isApproved:
+        typeof raw?.isApproved === 'boolean' ? raw.isApproved : true,
       canLogin: typeof raw?.canLogin === 'boolean' ? raw.canLogin : true,
-      canAudioCall: typeof raw?.canAudioCall === 'boolean' ? raw.canAudioCall : true,
-      canVideoCall: typeof raw?.canVideoCall === 'boolean' ? raw.canVideoCall : true,
+      canAudioCall:
+        typeof raw?.canAudioCall === 'boolean' ? raw.canAudioCall : true,
+      canVideoCall:
+        typeof raw?.canVideoCall === 'boolean' ? raw.canVideoCall : true,
       mustChangePassword:
-        typeof raw?.mustChangePassword === 'boolean' ? raw.mustChangePassword : !hasPasswordHash,
+        typeof raw?.mustChangePassword === 'boolean'
+          ? raw.mustChangePassword
+          : !hasPasswordHash,
       createdAt: Number(raw?.createdAt) || Date.now(),
       updatedAt: Number(raw?.updatedAt) || Number(raw?.createdAt) || Date.now()
     };
@@ -108,12 +122,43 @@ function createLanServer({ port = 4000, userDataPath }) {
     return users;
   }
 
+  function normalizeGroupRecord(raw, index) {
+    const memberIds = Array.isArray(raw?.memberIds)
+      ? [...new Set(raw.memberIds.map((v) => String(v || '')).filter(Boolean))]
+      : [];
+
+    const ownerUserId = raw?.ownerUserId ? String(raw.ownerUserId) : null;
+
+    if (ownerUserId && !memberIds.includes(ownerUserId)) {
+      memberIds.unshift(ownerUserId);
+    }
+
+    return {
+      id: String(raw?.id || createId('g')),
+      title: safeDisplayName(raw?.title || `Group ${index + 1}`) || `Group ${index + 1}`,
+      avatarUrl: typeof raw?.avatarUrl === 'string' ? raw.avatarUrl : null,
+      ownerUserId: ownerUserId || memberIds[0] || null,
+      memberIds,
+      createdAt: Number(raw?.createdAt) || Date.now(),
+      updatedAt: Number(raw?.updatedAt) || Number(raw?.createdAt) || Date.now()
+    };
+  }
+
+  function normalizeGroups(rawGroups) {
+    return Array.isArray(rawGroups) ? rawGroups.map(normalizeGroupRecord) : [];
+  }
+
   function normalizeDbShape(raw) {
     return {
       users: normalizeUsers(raw?.users),
+      groups: normalizeGroups(raw?.groups),
       messages: Array.isArray(raw?.messages) ? raw.messages : [],
-      conversationStates: Array.isArray(raw?.conversationStates) ? raw.conversationStates : [],
-      messageStates: Array.isArray(raw?.messageStates) ? raw.messageStates : [],
+      conversationStates: Array.isArray(raw?.conversationStates)
+        ? raw.conversationStates
+        : [],
+      messageStates: Array.isArray(raw?.messageStates)
+        ? raw.messageStates
+        : [],
       sessions: Array.isArray(raw?.sessions) ? raw.sessions : []
     };
   }
@@ -122,6 +167,7 @@ function createLanServer({ port = 4000, userDataPath }) {
     if (!fs.existsSync(dbFile)) {
       const initial = {
         users: [],
+        groups: [],
         messages: [],
         conversationStates: [],
         messageStates: [],
@@ -137,6 +183,7 @@ function createLanServer({ port = 4000, userDataPath }) {
     } catch {
       return {
         users: [],
+        groups: [],
         messages: [],
         conversationStates: [],
         messageStates: [],
@@ -162,6 +209,73 @@ function createLanServer({ port = 4000, userDataPath }) {
   function getUserByLoginId(userId) {
     const normalized = safeUserId(userId);
     return db.users.find((user) => user.userId === normalized) || null;
+  }
+
+  function getGroupById(groupId) {
+    return db.groups.find((group) => group.id === groupId) || null;
+  }
+
+  function getGroupsForUser(userId) {
+    return db.groups
+      .filter((group) => group.memberIds.includes(userId))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  }
+
+  function isGroupMember(groupId, userId) {
+    const group = getGroupById(groupId);
+    return !!group && group.memberIds.includes(userId);
+  }
+
+  function sanitizeGroup(group) {
+    return {
+      id: group.id,
+      title: group.title,
+      avatarUrl: group.avatarUrl || null,
+      ownerUserId: group.ownerUserId || null,
+      memberIds: Array.isArray(group.memberIds) ? [...group.memberIds] : [],
+      createdAt: group.createdAt,
+      updatedAt: group.updatedAt
+    };
+  }
+
+  function createGroupChat({ title, ownerUserId, memberIds }) {
+    const uniqueMemberIds = [
+      ...new Set([ownerUserId, ...(Array.isArray(memberIds) ? memberIds : [])].filter(Boolean))
+    ];
+
+    const now = Date.now();
+
+    const group = {
+      id: createId('g'),
+      title: safeDisplayName(title || 'New Group') || 'New Group',
+      avatarUrl: null,
+      ownerUserId,
+      memberIds: uniqueMemberIds,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    db.groups.push(group);
+    saveDb();
+
+    return group;
+  }
+
+  function syncSocketGroupRooms(socket, userId) {
+    const desiredRooms = new Set(
+      getGroupsForUser(userId).map((group) => `group:${group.id}`)
+    );
+
+    for (const room of socket.rooms) {
+      if (room === socket.id) continue;
+      if (room.startsWith('group:') && !desiredRooms.has(room)) {
+        socket.leave(room);
+      }
+    }
+
+    for (const room of desiredRooms) {
+      socket.join(room);
+    }
   }
 
   function hasAdminUser() {
@@ -303,15 +417,6 @@ function createLanServer({ port = 4000, userDataPath }) {
     next();
   }
 
-  function serializeAuthPayload(user) {
-    return {
-      user: sanitizeUser(user, user),
-      users: getVisibleUsersFor(user),
-      ...getPresencePayload(),
-      ...getActiveChatTargetsPayload()
-    };
-  }
-
   function getPresencePayload() {
     const onlineUserIds = [...onlineSockets.keys()];
     const onlineUserIdSet = new Set(onlineUserIds);
@@ -324,23 +429,23 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function getActiveChatTargetsPayload() {
     const result = {};
-  
+
     for (const [userId, selectedPeerUserId] of activeChatTargets.entries()) {
       result[userId] = selectedPeerUserId || null;
     }
-  
+
     return {
       activeChatTargets: result
     };
   }
-  
+
   function emitActiveChatTargets() {
     io.emit('chat:active-map', getActiveChatTargetsPayload());
   }
-  
+
   function setActiveChatTarget(userId, selectedPeerUserId, isWindowActive = true) {
     if (!userId) return;
-  
+
     const nextPeerUserId = isWindowActive ? String(selectedPeerUserId || '') : '';
     const nextValue =
       nextPeerUserId &&
@@ -348,19 +453,29 @@ function createLanServer({ port = 4000, userDataPath }) {
       getUserById(nextPeerUserId)
         ? nextPeerUserId
         : null;
-  
+
     if (activeChatTargets.get(userId) === nextValue) return;
-  
+
     activeChatTargets.set(userId, nextValue);
     emitActiveChatTargets();
   }
-  
+
   function clearActiveChatTarget(userId) {
     if (!userId) return;
     if (!activeChatTargets.has(userId)) return;
-  
+
     activeChatTargets.delete(userId);
     emitActiveChatTargets();
+  }
+
+  function serializeAuthPayload(user) {
+    return {
+      user: sanitizeUser(user, user),
+      users: getVisibleUsersFor(user),
+      groups: getGroupsForUser(user.id).map(sanitizeGroup),
+      ...getPresencePayload(),
+      ...getActiveChatTargetsPayload()
+    };
   }
 
   function findMessageById(messageId) {
@@ -434,7 +549,12 @@ function createLanServer({ port = 4000, userDataPath }) {
     const message = findMessageById(messageId);
     if (!message) return { ok: false, error: 'Message not found' };
 
-    if (message.fromUserId !== userId && message.toUserId !== userId) {
+    const canClear =
+      message.groupId
+        ? isGroupMember(message.groupId, userId)
+        : message.fromUserId === userId || message.toUserId === userId;
+
+    if (!canClear) {
       return { ok: false, error: 'You are not allowed to delete this message for yourself' };
     }
 
@@ -487,8 +607,18 @@ function createLanServer({ port = 4000, userDataPath }) {
     const clearedAt = getConversationClearedAt(viewerUserId, peerUserId);
 
     return db.messages
+      .filter((message) => !message.groupId)
       .filter((message) => message.conversationKey === key)
       .filter((message) => message.createdAt > clearedAt)
+      .filter((message) => !isMessageHiddenForUser(viewerUserId, message.id))
+      .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  function getGroupMessages(groupId, viewerUserId) {
+    if (!isGroupMember(groupId, viewerUserId)) return [];
+
+    return db.messages
+      .filter((message) => message.groupId === groupId)
       .filter((message) => !isMessageHiddenForUser(viewerUserId, message.id))
       .sort((a, b) => a.createdAt - b.createdAt);
   }
@@ -502,9 +632,12 @@ function createLanServer({ port = 4000, userDataPath }) {
 
     return {
       id: message.id,
-      conversationKey: message.conversationKey,
+      conversationKey:
+        message.conversationKey ||
+        (message.groupId ? groupConversationKey(message.groupId) : ''),
+      groupId: message.groupId || null,
       fromUserId: message.fromUserId,
-      toUserId: message.toUserId,
+      toUserId: message.toUserId || null,
       text: message.text,
       attachment: attachments[0] || null,
       attachments: attachments.length ? attachments : null,
@@ -528,7 +661,8 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function addMessage({
     fromUserId,
-    toUserId,
+    toUserId = null,
+    groupId = null,
     text = '',
     attachment = null,
     attachments = null,
@@ -537,11 +671,12 @@ function createLanServer({ port = 4000, userDataPath }) {
     system = null,
     call = null
   }) {
-    const normalizedAttachments = Array.isArray(attachments) && attachments.length
-      ? attachments
-      : attachment
-      ? [attachment]
-      : [];
+    const normalizedAttachments =
+      Array.isArray(attachments) && attachments.length
+        ? attachments
+        : attachment
+        ? [attachment]
+        : [];
 
     const messageType =
       type ||
@@ -553,9 +688,12 @@ function createLanServer({ port = 4000, userDataPath }) {
 
     const message = {
       id: createId('m'),
-      conversationKey: conversationKey(fromUserId, toUserId),
+      conversationKey: groupId
+        ? groupConversationKey(groupId)
+        : conversationKey(fromUserId, toUserId),
+      groupId: groupId || null,
       fromUserId,
-      toUserId,
+      toUserId: groupId ? null : toUserId,
       text,
       attachment: normalizedAttachments[0] || null,
       attachments: normalizedAttachments.length ? normalizedAttachments : null,
@@ -571,6 +709,14 @@ function createLanServer({ port = 4000, userDataPath }) {
     };
 
     db.messages.push(message);
+
+    if (groupId) {
+      const group = getGroupById(groupId);
+      if (group) {
+        group.updatedAt = Date.now();
+      }
+    }
+
     saveDb();
     return message;
   }
@@ -646,6 +792,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
     const original = findMessageById(replyToMessageId);
     if (!original) return null;
+    if (original.groupId) return null;
 
     if (original.conversationKey !== conversationKey(fromUserId, toUserId)) {
       return null;
@@ -654,6 +801,17 @@ function createLanServer({ port = 4000, userDataPath }) {
     if (['call', 'system'].includes(original.type)) {
       return null;
     }
+
+    return buildReplyToSnapshot(original);
+  }
+
+  function resolveGroupReplyTo(replyToMessageId, groupId) {
+    if (!replyToMessageId) return null;
+
+    const original = findMessageById(replyToMessageId);
+    if (!original) return null;
+    if (original.groupId !== groupId) return null;
+    if (['call', 'system'].includes(original.type)) return null;
 
     return buildReplyToSnapshot(original);
   }
@@ -667,12 +825,20 @@ function createLanServer({ port = 4000, userDataPath }) {
     }
 
     const key = conversationKey(userId, peerUserId);
-    const deletedMessages = db.messages.filter((message) => message.conversationKey === key);
+    const deletedMessages = db.messages.filter(
+      (message) => !message.groupId && message.conversationKey === key
+    );
     const deletedMessageIds = new Set(deletedMessages.map((message) => message.id));
 
-    db.messages = db.messages.filter((message) => message.conversationKey !== key);
-    db.conversationStates = db.conversationStates.filter((state) => state.conversationKey !== key);
-    db.messageStates = db.messageStates.filter((state) => !deletedMessageIds.has(state.messageId));
+    db.messages = db.messages.filter(
+      (message) => message.groupId || message.conversationKey !== key
+    );
+    db.conversationStates = db.conversationStates.filter(
+      (state) => state.conversationKey !== key
+    );
+    db.messageStates = db.messageStates.filter(
+      (state) => !deletedMessageIds.has(state.messageId)
+    );
 
     saveDb();
     clearActiveCall(key);
@@ -707,6 +873,12 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function emitMessageToParticipants(message) {
     const payload = serializeMessage(message);
+
+    if (message.groupId) {
+      io.to(`group:${message.groupId}`).emit('message:new', payload);
+      return;
+    }
+
     const senderSocketId = onlineSockets.get(message.fromUserId);
     const receiverSocketId = onlineSockets.get(message.toUserId);
 
@@ -715,6 +887,8 @@ function createLanServer({ port = 4000, userDataPath }) {
   }
 
   function emitMessageStatus(message) {
+    if (message.groupId) return;
+
     const payload = {
       messageId: message.id,
       deliveredAt: message.deliveredAt || null,
@@ -824,7 +998,8 @@ function createLanServer({ port = 4000, userDataPath }) {
     res.json({
       ok: true,
       port,
-      userCount: db.users.length
+      userCount: db.users.length,
+      groupCount: db.groups.length
     });
   });
 
@@ -905,6 +1080,66 @@ function createLanServer({ port = 4000, userDataPath }) {
     res.json({
       users: getVisibleUsersFor(req.user),
       ...getPresencePayload()
+    });
+  });
+
+  app.get('/api/groups', requireAuth, (req, res) => {
+    res.json({
+      ok: true,
+      groups: getGroupsForUser(req.user.id).map(sanitizeGroup)
+    });
+  });
+
+  app.post('/api/groups', requireAuth, (req, res) => {
+    const title = safeDisplayName(req.body?.title);
+    const incomingMemberIds = Array.isArray(req.body?.memberIds)
+      ? req.body.memberIds.map((v) => String(v || '')).filter(Boolean)
+      : [];
+
+    const validMemberIds = incomingMemberIds.filter((userId) => {
+      const user = getUserById(userId);
+      return !!user && user.isApproved;
+    });
+
+    const memberIds = [...new Set(validMemberIds.filter((userId) => userId !== req.user.id))];
+
+    if (!title) {
+      return res.status(400).json({ error: 'Group title is required' });
+    }
+
+    if (!memberIds.length) {
+      return res.status(400).json({ error: 'Select at least one member' });
+    }
+
+    const group = createGroupChat({
+      title,
+      ownerUserId: req.user.id,
+      memberIds
+    });
+
+    emitUsersChanged();
+
+    res.json({
+      ok: true,
+      group: sanitizeGroup(group)
+    });
+  });
+
+  app.get('/api/groups/:groupId/messages', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const group = getGroupById(groupId);
+
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+
+    if (!isGroupMember(groupId, req.user.id)) {
+      return res.status(403).json({ error: 'Unauthorized group access' });
+    }
+
+    res.json({
+      ok: true,
+      messages: getGroupMessages(groupId, req.user.id).map(serializeMessage)
     });
   });
 
@@ -1056,14 +1291,12 @@ function createLanServer({ port = 4000, userDataPath }) {
   app.post('/api/upload', requireAuth, upload.any(), (req, res) => {
     const fromUserId = req.user.id;
     const toUserId = String(req.body?.toUserId || '');
+    const groupId = String(req.body?.groupId || '');
     const text = String(req.body?.text || '');
     const replyToMessageId = String(req.body?.replyToMessageId || '');
-
-    const sender = getUserById(fromUserId);
-    const receiver = getUserById(toUserId);
     const uploadedFiles = Array.isArray(req.files) ? req.files : [];
 
-    if (!sender || !receiver || !uploadedFiles.length) {
+    if (!uploadedFiles.length) {
       return res.status(400).json({ error: 'Invalid upload request' });
     }
 
@@ -1079,6 +1312,38 @@ function createLanServer({ port = 4000, userDataPath }) {
       return res.status(400).json({
         error: 'Only multiple images can be sent as one gallery message'
       });
+    }
+
+    if (groupId) {
+      const group = getGroupById(groupId);
+      if (!group || !isGroupMember(groupId, fromUserId)) {
+        return res.status(400).json({ error: 'Invalid group upload request' });
+      }
+
+      const replyTo = resolveGroupReplyTo(replyToMessageId, groupId);
+
+      const message = addMessage({
+        fromUserId,
+        groupId,
+        text,
+        attachment: attachments.length === 1 ? attachments[0] : null,
+        attachments: attachments.length > 1 ? attachments : null,
+        type: attachments.length > 1 ? 'gallery' : 'file',
+        replyTo
+      });
+
+      emitMessageToParticipants(message);
+
+      return res.json({
+        message: serializeMessage(message)
+      });
+    }
+
+    const sender = getUserById(fromUserId);
+    const receiver = getUserById(toUserId);
+
+    if (!sender || !receiver) {
+      return res.status(400).json({ error: 'Invalid upload request' });
     }
 
     const replyTo = resolveReplyTo(replyToMessageId, fromUserId, toUserId);
@@ -1107,26 +1372,27 @@ function createLanServer({ port = 4000, userDataPath }) {
         callback?.({ ok: false, error: 'Unauthorized' });
         return;
       }
-    
+
       const user = getUserById(session.userId);
       if (!user || !user.isApproved || !user.canLogin) {
         callback?.({ ok: false, error: 'Login is not allowed' });
         return;
       }
-    
+
       socket.data.userId = user.id;
       socket.data.authToken = token;
-    
+
       onlineSockets.set(user.id, socket.id);
       idleUserIds.delete(user.id);
       activeChatTargets.set(user.id, null);
-    
+
+      syncSocketGroupRooms(socket, user.id);
+
       emitPresence();
       emitActiveChatTargets();
-    
-      // Tell other already-connected clients to refresh their user list
+
       socket.broadcast.emit('users:changed');
-    
+
       callback?.({
         ok: true,
         ...serializeAuthPayload(user)
@@ -1137,9 +1403,14 @@ function createLanServer({ port = 4000, userDataPath }) {
       const userId = socket.data.userId;
       const user = getUserById(userId);
 
+      if (user) {
+        syncSocketGroupRooms(socket, user.id);
+      }
+
       callback?.({
         ok: !!user,
         users: user ? getVisibleUsersFor(user) : [],
+        groups: user ? getGroupsForUser(user.id).map(sanitizeGroup) : [],
         ...getPresencePayload(),
         ...getActiveChatTargetsPayload()
       });
@@ -1221,18 +1492,45 @@ function createLanServer({ port = 4000, userDataPath }) {
       callback?.(result);
     });
 
-    socket.on('message:send', ({ toUserId, text, replyToMessageId }, callback) => {
+    socket.on('message:send', ({ toUserId, groupId, text, replyToMessageId }, callback) => {
       const fromUserId = socket.data.userId;
       if (!fromUserId) {
         callback?.({ ok: false, error: 'Unauthorized' });
         return;
       }
 
-      const sender = getUserById(fromUserId);
-      const receiver = getUserById(toUserId);
       const clean = String(text || '').trim();
 
-      if (!sender || !receiver || !clean) {
+      if (!clean) {
+        callback?.({ ok: false, error: 'Invalid message' });
+        return;
+      }
+
+      if (groupId) {
+        const group = getGroupById(String(groupId));
+        if (!group || !isGroupMember(group.id, fromUserId)) {
+          callback?.({ ok: false, error: 'Invalid group message' });
+          return;
+        }
+
+        const replyTo = resolveGroupReplyTo(replyToMessageId, group.id);
+
+        const message = addMessage({
+          fromUserId,
+          groupId: group.id,
+          text: clean,
+          replyTo
+        });
+
+        emitMessageToParticipants(message);
+        callback?.({ ok: true, message: serializeMessage(message) });
+        return;
+      }
+
+      const sender = getUserById(fromUserId);
+      const receiver = getUserById(toUserId);
+
+      if (!sender || !receiver) {
         callback?.({ ok: false, error: 'Invalid message' });
         return;
       }
@@ -1264,11 +1562,17 @@ function createLanServer({ port = 4000, userDataPath }) {
       }
 
       const payload = serializeMessage(result.message);
-      const peerId = payload.fromUserId === byUserId ? payload.toUserId : payload.fromUserId;
-      const peerSocketId = onlineSockets.get(peerId);
 
-      if (peerSocketId) io.to(peerSocketId).emit('message:deleted', payload);
-      io.to(socket.id).emit('message:deleted', payload);
+      if (payload.groupId) {
+        io.to(`group:${payload.groupId}`).emit('message:deleted', payload);
+      } else {
+        const peerId =
+          payload.fromUserId === byUserId ? payload.toUserId : payload.fromUserId;
+        const peerSocketId = onlineSockets.get(peerId);
+
+        if (peerSocketId) io.to(peerSocketId).emit('message:deleted', payload);
+        io.to(socket.id).emit('message:deleted', payload);
+      }
 
       callback?.({ ok: true, message: payload });
     });
@@ -1279,6 +1583,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       const message = findMessageById(messageId);
       if (!message) return;
+      if (message.groupId) return;
       if (message.toUserId !== byUserId) return;
       if (message.type === 'deleted') return;
 
@@ -1296,6 +1601,7 @@ function createLanServer({ port = 4000, userDataPath }) {
 
       const message = findMessageById(messageId);
       if (!message) return;
+      if (message.groupId) return;
       if (message.toUserId !== byUserId) return;
       if (message.type === 'deleted') return;
 
@@ -1311,15 +1617,27 @@ function createLanServer({ port = 4000, userDataPath }) {
       emitMessageStatus(message);
     });
 
-    socket.on('typing:set', ({ toUserId, isTyping }) => {
+    socket.on('typing:set', ({ toUserId, groupId, isTyping }) => {
       const fromUserId = socket.data.userId;
       if (!fromUserId) return;
+
+      if (groupId) {
+        if (!isGroupMember(groupId, fromUserId)) return;
+
+        socket.to(`group:${groupId}`).emit('typing:update', {
+          fromUserId,
+          groupId,
+          isTyping: !!isTyping
+        });
+        return;
+      }
 
       const targetSocketId = onlineSockets.get(toUserId);
       if (!targetSocketId) return;
 
       io.to(targetSocketId).emit('typing:update', {
         fromUserId,
+        groupId: null,
         isTyping: !!isTyping
       });
     });
