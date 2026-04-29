@@ -5469,17 +5469,26 @@ export default function App() {
                   const mine = m.fromUserId === me.id;
                   const prev = activeMessages[idx - 1];
                   const next = activeMessages[idx + 1];
+                  
                   const showUnreadDivider =
                     !mine &&
                     ((selectedChatKind === 'direct' && firstUnreadMessageId === m.id) ||
                       (selectedChatKind === 'group' && firstUnreadGroupMessageId === m.id));
-
+                  
                   const showDivider =
                     !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
-
-                  const nextIsSameSenderGroup = isRenderableMessage(next) && next!.fromUserId === m.fromUserId;
+                  
+                  const prevIsSameSenderGroup =
+                    isRenderableMessage(prev) && prev!.fromUserId === m.fromUserId;
+                  
+                  const nextIsSameSenderGroup =
+                    isRenderableMessage(next) && next!.fromUserId === m.fromUserId;
+                  
                   const showAvatarForThisMessage = !nextIsSameSenderGroup;
-
+                  
+                  const showSenderNameForThisMessage =
+                    selectedChatKind === 'group' && !mine && !prevIsSameSenderGroup;
+                  
                   const attachments = getMessageAttachments(m);
                   const isGallery = isGalleryMessage(m);
                   const useTelegramInlineMeta = !!m.text && attachments.length === 0;
@@ -5537,7 +5546,7 @@ export default function App() {
 
                           <div className="message-stack">
                             <div className={`bubble ${mine ? 'mine' : ''} ${useTelegramInlineMeta ? 'telegram-inline-meta' : ''}`}>
-                              {selectedChatKind === 'group' && !mine ? (
+                              {showSenderNameForThisMessage ? (
                                 <div className="reply-preview-author" style={{ marginBottom: 6 }}>
                                   {userName(m.fromUserId)}
                                 </div>
@@ -5666,8 +5675,6 @@ export default function App() {
             </div>
 
             <footer className="composer" ref={composerRef}>
-              <button className="emoji-btn">☺</button>
-
               <div className="composer-center">
                 {pendingUploads.length ? (
                   <div className="composer-attachments">
@@ -5701,6 +5708,7 @@ export default function App() {
                     ))}
                   </div>
                 ) : null}
+
                 {replyingTo ? (
                   <div className="reply-draft">
                     <div className="reply-draft-bar" />
@@ -5724,6 +5732,7 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
+
                 {selectedChatKind === 'group' && mentionState ? (
                   <div className="mention-popup">
                     {mentionCandidates.length ? (
@@ -5754,89 +5763,92 @@ export default function App() {
                     )}
                   </div>
                 ) : null}
-                <textarea
-                  ref={composerInputRef}
-                  className="composer-input"
-                  value={draft}
-                  rows={1}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    const caret = e.target.selectionStart ?? value.length;
 
-                    setDraft(value);
-                    startTyping();
-                    resizeComposerTextarea();
-                    updateMentionState(value, caret);
-                  }}
-                  onClick={(e) => {
-                    updateMentionState(
-                      e.currentTarget.value,
-                      e.currentTarget.selectionStart ?? e.currentTarget.value.length
-                    );
-                  }}
-                  onKeyUp={(e) => {
-                    updateMentionState(
-                      e.currentTarget.value,
-                      e.currentTarget.selectionStart ?? e.currentTarget.value.length
-                    );
-                  }}
-                  onPaste={handleComposerPaste}
-                  onBlur={() => {
-                    stopTyping();
-                    window.setTimeout(() => {
-                      setMentionState(null);
-                    }, 120);
-                  }}
-                  onKeyDown={(e) => {
-                    if (selectedChatKind === 'group' && mentionState) {
-                      if (e.key === 'ArrowDown') {
-                        e.preventDefault();
-                        if (mentionCandidates.length) {
-                          setMentionActiveIndex((prev) =>
-                            prev + 1 >= mentionCandidates.length ? 0 : prev + 1
-                          );
-                        }
-                        return;
-                      }
+                <div className="composer-input-row">
+                  <textarea
+                    ref={composerInputRef}
+                    className="composer-input"
+                    value={draft}
+                    rows={1}
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      const caret = e.target.selectionStart ?? value.length;
 
-                      if (e.key === 'ArrowUp') {
-                        e.preventDefault();
-                        if (mentionCandidates.length) {
-                          setMentionActiveIndex((prev) =>
-                            prev - 1 < 0 ? mentionCandidates.length - 1 : prev - 1
-                          );
-                        }
-                        return;
-                      }
-
-                      if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && mentionCandidates.length) {
-                        e.preventDefault();
-                        insertMention(mentionCandidates[mentionActiveIndex] || mentionCandidates[0]);
-                        return;
-                      }
-
-                      if (e.key === 'Escape') {
+                      setDraft(value);
+                      startTyping();
+                      resizeComposerTextarea();
+                      updateMentionState(value, caret);
+                    }}
+                    onClick={(e) => {
+                      updateMentionState(
+                        e.currentTarget.value,
+                        e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                      );
+                    }}
+                    onKeyUp={(e) => {
+                      updateMentionState(
+                        e.currentTarget.value,
+                        e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                      );
+                    }}
+                    onPaste={handleComposerPaste}
+                    onBlur={() => {
+                      stopTyping();
+                      window.setTimeout(() => {
                         setMentionState(null);
-                        return;
+                      }, 120);
+                    }}
+                    onKeyDown={(e) => {
+                      if (selectedChatKind === 'group' && mentionState) {
+                        if (e.key === 'ArrowDown') {
+                          e.preventDefault();
+                          if (mentionCandidates.length) {
+                            setMentionActiveIndex((prev) =>
+                              prev + 1 >= mentionCandidates.length ? 0 : prev + 1
+                            );
+                          }
+                          return;
+                        }
+
+                        if (e.key === 'ArrowUp') {
+                          e.preventDefault();
+                          if (mentionCandidates.length) {
+                            setMentionActiveIndex((prev) =>
+                              prev - 1 < 0 ? mentionCandidates.length - 1 : prev - 1
+                            );
+                          }
+                          return;
+                        }
+
+                        if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && mentionCandidates.length) {
+                          e.preventDefault();
+                          insertMention(mentionCandidates[mentionActiveIndex] || mentionCandidates[0]);
+                          return;
+                        }
+
+                        if (e.key === 'Escape') {
+                          setMentionState(null);
+                          return;
+                        }
                       }
-                    }
 
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      void sendMessage();
-                    }
-                  }}
-                  placeholder={pendingUploads.length ? 'Add a caption' : 'Type a message'}
-                />
-              </div>
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        void sendMessage();
+                      }
+                    }}
+                    placeholder={pendingUploads.length ? 'Add a caption' : 'Type a message'}
+                  />
 
-              <div className="composer-actions">
-                <button className="icon-btn small" onClick={sendAttachment} title="Attach file">
-                  📎
-                </button>
-                <button className="send-btn" onClick={sendMessage}>
-                  ➤
-                </button>
+                  <div className="composer-actions">
+                    <button className="icon-btn small" onClick={sendAttachment} title="Attach file">
+                      📎
+                    </button>
+                    <button className="send-btn" onClick={sendMessage}>
+                      ➤
+                    </button>
+                  </div>
+                </div>
               </div>
             </footer>
           </>
