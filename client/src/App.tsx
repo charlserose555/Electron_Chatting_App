@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 const FIXED_SERVER_URL = 'http://172.16.67.6:4000';
@@ -24,6 +24,38 @@ type Attachment = {
   isImage: boolean;
 };
 
+type GroupChat = {
+  id: string;
+  title: string;
+  avatarUrl?: string | null;
+  ownerUserId?: string | null;
+  memberIds: string[];
+  adminUserIds: string[];
+  invitedUserIds: string[];
+  joinRequestUserIds: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+type GroupNotice = {
+  id: string;
+  kind: 'info' | 'deleted';
+  groupId: string;
+  title: string;
+  message: string;
+  createdAt: number;
+};
+
+type GroupInvite = {
+  groupId: string;
+  title: string;
+  avatarUrl?: string | null;
+  ownerUserId?: string | null;
+  adminUserIds: string[];
+  status: 'invited' | 'requested';
+  createdAt: number;
+};
+
 type ReplyTo = {
   messageId: string;
   fromUserId: string;
@@ -31,6 +63,14 @@ type ReplyTo = {
   attachmentName: string | null;
   isImage: boolean;
 };
+
+type GroupConfirmDialog =
+  | {
+      mode: 'leave' | 'delete';
+      groupId: string;
+      title: string;
+    }
+  | null;
 
 type ToastTone = 'info' | 'success' | 'error';
 
@@ -42,24 +82,17 @@ type AppToast = {
 
 type AppNotification = {
   id: string;
-  kind: 'login' | 'logout';
-  userId: string;
+  kind: 'login' | 'logout' | 'group';
+  userId: string | null;
   userName: string;
+  title: string;
+  body: string;
   avatarUrl?: string | null;
+  groupId?: string | null;
   createdAt: number;
 };
 
 type CallMode = 'audio' | 'video';
-
-type GroupChat = {
-  id: string;
-  title: string;
-  avatarUrl?: string | null;
-  ownerUserId?: string | null;
-  memberIds: string[];
-  createdAt: number;
-  updatedAt: number;
-};
 
 type Message = {
   id: string;
@@ -94,7 +127,7 @@ type Message = {
   groupReadByUserIds: string[] | null;
 };
 
-type SidebarTab = 'chats' | 'calls' | 'notifications';
+type SidebarTab = 'chats' | 'calls' | 'notifications' | 'invitations';
 
 type PendingUpload = {
   id: string;
@@ -655,6 +688,89 @@ function ImageLightbox({
   );
 }
 
+function ConfirmModal({
+  open,
+  title,
+  subtitle,
+  children,
+  onClose,
+  onConfirm,
+  confirmText = 'Confirm',
+  cancelText = 'Cancel',
+  confirmClassName = 'danger wide',
+  width = 'min(480px, calc(100% - 32px))',
+  actions
+}: {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  onClose: () => void;
+  onConfirm?: () => void;
+  confirmText?: string;
+  cancelText?: string;
+  confirmClassName?: string;
+  width?: string;
+  actions?: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="call-overlay" onClick={onClose}>
+      <div
+        className="call-modal"
+        style={{ width }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="call-top">
+          <div>
+            <div className="call-name">{title}</div>
+            {subtitle ? <div className="call-sub">{subtitle}</div> : null}
+          </div>
+        </div>
+
+        <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+          {children}
+        </div>
+
+        <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+          {actions ? (
+            actions
+          ) : (
+            <>
+              <button className="icon-btn wide" onClick={onClose}>
+                {cancelText}
+              </button>
+
+              <button
+                className={confirmClassName}
+                onClick={() => {
+                  onConfirm?.();
+                }}
+              >
+                {confirmText}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UserAvatar({
   user,
   serverUrl,
@@ -684,10 +800,18 @@ function UserAvatar({
   );
 }
 
-function presenceNotificationText(item: AppNotification) {
-  return item.kind === 'login'
-    ? `${item.userName} logged in`
-    : `${item.userName} logged out`;
+function notificationText(item: AppNotification) {
+  if (item.body) return item.body;
+
+  if (item.kind === 'login') {
+    return `${item.userName} logged in`;
+  }
+
+  if (item.kind === 'logout') {
+    return `${item.userName} logged out`;
+  }
+
+  return item.title || 'Group update';
 }
 
 function playPresenceNotificationSound() {
@@ -759,6 +883,9 @@ export default function App() {
   const incomingCallModeRef = useRef<CallMode | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>('chats');
 
+  const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
+  const [groupManageOpen, setGroupManageOpen] = useState(false);
+
   const [groups, setGroups] = useState<GroupChat[]>([]);
   const [selectedChatKind, setSelectedChatKind] = useState<'direct' | 'group'>('direct');
   const [selectedGroupId, setSelectedGroupId] = useState('');
@@ -819,6 +946,13 @@ export default function App() {
   const activeSidebarTabRef = useRef<SidebarTab>('chats');
   const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false);
   const sidebarMenuRef = useRef<HTMLDivElement | null>(null);
+  const [groupManageTab, setGroupManageTab] = useState<'general' | 'members'>('general');
+  const [groupEditTitle, setGroupEditTitle] = useState('');
+  const [groupConfirmDialog, setGroupConfirmDialog] = useState<GroupConfirmDialog>(null);
+
+  const [deleteGroupChatTargetId, setDeleteGroupChatTargetId] = useState<string | null>(null);
+  const deleteGroupChatTarget =
+    groups.find((g) => g.id === deleteGroupChatTargetId) || null;
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -878,6 +1012,30 @@ export default function App() {
   useEffect(() => {
     activeSidebarTabRef.current = activeSidebarTab;
   }, [activeSidebarTab]);
+
+  useEffect(() => {
+    if (!groupManageOpen) {
+      setGroupConfirmDialog(null);
+    }
+  }, [groupManageOpen]);
+  
+  useEffect(() => {
+    setGroupConfirmDialog(null);
+  }, [selectedGroupId]);
+
+  useEffect(() => {
+    setReplyingTo(null);
+    setDeleteChatTargetUserId(null);
+    setDeleteGroupChatTargetId(null);
+    setDeleteMessageTargetId(null);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
+    clearPendingUploads();
+    setLightbox(null);
+  
+    suppressAutoReadUntilBottomRef.current = false;
+    hasUserScrolledCurrentChatRef.current = false;
+  }, [selectedUserId, selectedGroupId, selectedChatKind]);
 
   useEffect(() => {
     function handleOutsideClick(event: MouseEvent) {
@@ -1089,19 +1247,6 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    setReplyingTo(null);
-    setDeleteChatTargetUserId(null);
-    setDeleteMessageTargetId(null);
-    setIncomingCallMode(null);
-    incomingCallModeRef.current = null;
-    clearPendingUploads();
-    setLightbox(null);
-  
-    suppressAutoReadUntilBottomRef.current = false;
-    hasUserScrolledCurrentChatRef.current = false;
-  }, [selectedUserId, selectedGroupId, selectedChatKind]);
-
   async function handleRegister() {
     if (!loginUserId.trim()) {
       showError('Enter user ID');
@@ -1171,13 +1316,13 @@ export default function App() {
     setActiveChatTargets(loginData.activeChatTargets || {});
     setHasExplicitContactSelection(false);
     setNotifications(loginData.notifications || []);
+    setGroupInvites(loginData.groupInvites || []);
 
     setIsSocketAuthed(false);
     setSelectedChatKind('direct');
     setSelectedUserId('');
     setSelectedGroupId('');
     setActiveSidebarTab('chats');
-    setNotifications([]);
     setUnreadNotificationCount(0);
   
     socketRef.current?.disconnect();
@@ -1201,7 +1346,8 @@ export default function App() {
         setActiveChatTargets(payload.activeChatTargets || {});
         setHasExplicitContactSelection(false);
         setNotifications(payload.notifications || []);
-  
+        setGroupInvites(payload.groupInvites || []);
+
         const historyMap = await loadAllHistories(
           payload.users || [],
           loginData.token,
@@ -1250,6 +1396,7 @@ export default function App() {
       meRef.current = null;
       setAuthToken('');
       setNotifications([]);
+      setGroupInvites([]);
       setUnreadNotificationCount(0);
       setActiveSidebarTab('chats');
     });
@@ -1322,6 +1469,28 @@ export default function App() {
         setActiveChatTargets(activeChatTargets || {});
       }
     );
+
+    socket.on('group:notice', (notice: GroupNotice) => {
+      const isCurrentGroup =
+        selectedChatKindRef.current === 'group' &&
+        selectedGroupIdRef.current === notice.groupId;
+    
+      if (!isCurrentGroup || notice.kind === 'deleted') {
+        showToast(notice.message, 'info', 3600);
+      }
+    
+      if (!isWindowActiveRef.current || !isCurrentGroup) {
+        desktopApi.notify({
+          title: notice.title || 'Group update',
+          body: notice.message
+        });
+      }
+    
+      if (notice.kind === 'deleted') {
+        setGroupManageOpen(false);
+        setGroupConfirmDialog(null);
+      }
+    });
   
     socket.on('users:changed', () => {
       socket.emit(
@@ -1332,12 +1501,14 @@ export default function App() {
           idleUserIds: string[];
           activeChatTargets?: Record<string, string | null>;
           groups?: GroupChat[];
+          groupInvites?: GroupInvite[];
         }) => {
           setUsers(payload.users || []);
           setGroups(payload.groups || []);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
           setActiveChatTargets(payload.activeChatTargets || {});
+          setGroupInvites(payload.groupInvites || []);
   
           const historyMap = await loadAllHistories(
             payload.users || [],
@@ -1393,13 +1564,16 @@ export default function App() {
       }
     );
     
-    socket.on('notification:user-presence', (item: AppNotification) => {
-      if (item.userId === loginData.user.id) return;
+    socket.on('notification:new', (item: AppNotification) => {
+      if (item.kind !== 'group' && item.userId === loginData.user.id) return;
     
       setNotifications((prev) => [item, ...prev].slice(0, 200));
     
-      playPresenceNotificationSound();
-      showToast(presenceNotificationText(item), 'info', 3200);
+      if (item.kind === 'login' || item.kind === 'logout') {
+        playPresenceNotificationSound();
+      }
+    
+      showToast(notificationText(item), 'info', 3200);
     
       if (activeSidebarTabRef.current !== 'notifications') {
         setUnreadNotificationCount((prev) => prev + 1);
@@ -1473,6 +1647,40 @@ export default function App() {
         }
       }
     });
+
+    socket.on(
+      'group:conversation:cleared-for-me',
+      ({
+        conversationKey: clearedConversationKey
+      }: {
+        groupId: string;
+        conversationKey: string;
+        userId: string;
+        clearedAt: number;
+      }) => {
+        clearConversationLocally(clearedConversationKey);
+        setDeleteGroupChatTargetId(null);
+      }
+    );
+    
+    socket.on(
+      'group:conversation:deleted',
+      ({
+        conversationKey: deletedConversationKey,
+        byUserId
+      }: {
+        groupId: string;
+        conversationKey: string;
+        byUserId: string;
+      }) => {
+        clearConversationLocally(deletedConversationKey);
+        setDeleteGroupChatTargetId(null);
+    
+        if (byUserId !== meRef.current?.id) {
+          showToast(`${userNameFromList(byUserId, usersRef.current)} cleared the group chat`, 'info', 3200);
+        }
+      }
+    );
   
     socket.on('message:deleted', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -1692,6 +1900,7 @@ export default function App() {
     setHasExplicitContactSelection(false);
     setMessagesByConv({});
     setNotifications([]);
+    setGroupInvites([]);
     setUnreadNotificationCount(0);
     setActiveSidebarTab('chats');
     setMe(null);
@@ -1700,6 +1909,287 @@ export default function App() {
     setSelectedUserId('');
     setSelectedGroupId('');
     setSelectedChatKind('direct');
+  }
+
+  async function inviteUserToGroup(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to invite user');
+      return;
+    }
+  
+    if (data.requiresOwnerApproval) {
+      showSuccess('Invitation sent. Owner approval will be required after acceptance.');
+    } else {
+      showSuccess('Invitation sent. User can join immediately after acceptance.');
+    }
+  }
+  
+  async function acceptGroupInvite(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite/accept`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to accept invite');
+      return;
+    }
+  
+    setGroupInvites((prev) => prev.filter((item) => item.groupId !== groupId));
+  
+    if (data.joinedDirectly) {
+      showSuccess('Invitation accepted. You joined the group.');
+    } else {
+      showSuccess('Invitation accepted. Waiting for owner approval.');
+    }
+  }
+  
+  async function declineGroupInvite(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite/decline`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to decline invite');
+      return;
+    }
+  
+    setGroupInvites((prev) => prev.filter((item) => item.groupId !== groupId));
+    showSuccess('Invitation declined');
+  }
+  
+  async function approveGroupJoinRequest(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/requests/${userId}/approve`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to approve user');
+      return;
+    }
+  
+    showSuccess('User added to group');
+  }
+  
+  async function rejectGroupJoinRequest(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/requests/${userId}/reject`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to reject request');
+      return;
+    }
+  
+    showSuccess('Request rejected');
+  }
+  
+  async function setUserAdminRole(groupId: string, userId: string, makeAdmin: boolean) {
+    const res = await apiFetch(`/api/groups/${groupId}/admins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, makeAdmin })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to update role');
+      return;
+    }
+  
+    showSuccess(makeAdmin ? 'User promoted to group admin' : 'Admin role removed');
+  }
+
+  function deleteOwnGroupMessagesForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:messages:delete-own',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string; deletedCount?: number }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete your messages for everyone');
+          return;
+        }
+  
+        setDeleteGroupChatTargetId(null);
+  
+        showSuccess(
+          result.deletedCount
+            ? `${result.deletedCount} message${result.deletedCount > 1 ? 's were' : ' was'} deleted for everyone`
+            : 'You have no messages to delete in this group'
+        );
+      }
+    );
+  }
+
+  function clearGroupChatForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:delete',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to clear group chat for everyone');
+          return;
+        }
+  
+        setDeleteGroupChatTargetId(null);
+        showSuccess('Group chat cleared for everyone');
+      }
+    );
+  }
+  
+  async function removeGroupMember(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/members/${userId}`, {
+      method: 'DELETE'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to remove member');
+      return;
+    }
+  
+    showSuccess('Member removed');
+  }
+
+  function removeGroupConversationLocally(groupId: string) {
+    const key = groupConversationKey(groupId);
+  
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+  
+  function moveAwayFromGroup(groupId: string) {
+    if (!me) return;
+  
+    const remainingGroups = groups.filter((group) => group.id !== groupId);
+    const fallbackDirect = pickPreferredDirectUserId({
+      meId: me.id,
+      users,
+      onlineUserIds,
+      idleUserIds,
+      historyMap: messagesByConv
+    });
+  
+    if (selectedChatKind === 'group' && selectedGroupId === groupId) {
+      if (remainingGroups.length) {
+        setSelectedChatKind('group');
+        setSelectedGroupId(remainingGroups[0].id);
+        setSelectedUserId('');
+        return;
+      }
+  
+      if (fallbackDirect) {
+        setSelectedChatKind('direct');
+        setSelectedUserId(fallbackDirect);
+        setSelectedGroupId('');
+        return;
+      }
+  
+      setSelectedChatKind('direct');
+      setSelectedUserId('');
+      setSelectedGroupId('');
+    }
+  }
+  
+  async function leaveGroup(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/leave`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to leave group');
+      return;
+    }
+  
+    setGroupManageOpen(false);
+    setGroups((prev) => prev.filter((group) => group.id !== groupId));
+    removeGroupConversationLocally(groupId);
+    moveAwayFromGroup(groupId);
+  
+    showSuccess('You left the group');
+  }
+  
+  async function deleteGroup(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}`, {
+      method: 'DELETE'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to delete group');
+      return;
+    }
+  
+    setGroupManageOpen(false);
+    setGroups((prev) => prev.filter((group) => group.id !== groupId));
+    removeGroupConversationLocally(groupId);
+    moveAwayFromGroup(groupId);
+  
+    showSuccess('Group deleted');
+  }
+
+  async function confirmGroupDangerAction() {
+    if (!groupConfirmDialog) return;
+  
+    const { mode, groupId } = groupConfirmDialog;
+    setGroupConfirmDialog(null);
+  
+    if (mode === 'leave') {
+      await leaveGroup(groupId);
+      return;
+    }
+  
+    await deleteGroup(groupId);
+  }
+  
+  async function uploadGroupAvatar(groupId: string, file: File) {
+    const form = new FormData();
+    form.append('avatar', file);
+  
+    const res = await apiFetch(`/api/groups/${groupId}/avatar`, {
+      method: 'POST',
+      body: form
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to upload group avatar');
+      return;
+    }
+  
+    showSuccess('Group avatar updated');
   }
 
   function getRenderableUser(userId: string): User {
@@ -1758,6 +2248,10 @@ export default function App() {
       })
       .sort((a, b) => b.message.createdAt - a.message.createdAt);
   }, [messagesByConv, users, me]);
+  
+  const invitationCount = useMemo(() => {
+    return groupInvites.filter((item) => item.status === 'invited').length;
+  }, [groupInvites]);
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
@@ -2127,6 +2621,36 @@ export default function App() {
 
   function registerManualMessageScroll() {
     hasUserScrolledCurrentChatRef.current = true;
+  }
+
+  async function updateGroupTitle(groupId: string, title: string) {
+    const trimmed = title.trim();
+  
+    if (!trimmed) {
+      showError('Group name is required');
+      return;
+    }
+  
+    const res = await apiFetch(`/api/groups/${groupId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: trimmed })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to update group name');
+      return;
+    }
+  
+    setGroups((prev) =>
+      prev.map((group) =>
+        group.id === groupId ? { ...group, ...data.group } : group
+      )
+    );
+  
+    showSuccess('Group name updated');
   }
 
   async function loadHistory(peerUserId: string, forceScroll = false) {
@@ -2520,6 +3044,19 @@ export default function App() {
     }
     setToast(null);
   }
+
+  function isGroupOwner(group: GroupChat | null, userId?: string | null) {
+    return !!group && !!userId && group.ownerUserId === userId;
+  }
+  
+  function isGroupAdmin(group: GroupChat | null, userId?: string | null) {
+    return (
+      !!group &&
+      !!userId &&
+      (group.ownerUserId === userId || group.adminUserIds.includes(userId))
+    );
+  }
+  
   
   function showToast(message: string, tone: ToastTone = 'info', duration = 3600) {
     if (toastTimerRef.current) {
@@ -2731,8 +3268,16 @@ export default function App() {
       return next;
     });
   
+    const currentMe = meRef.current;
+  
     const activeKey =
-      me && selectedUserIdRef.current ? conversationKey(me.id, selectedUserIdRef.current) : '';
+      currentMe
+        ? selectedChatKindRef.current === 'group' && selectedGroupIdRef.current
+          ? groupConversationKey(selectedGroupIdRef.current)
+          : selectedUserIdRef.current
+          ? conversationKey(currentMe.id, selectedUserIdRef.current)
+          : ''
+        : '';
   
     if (conversationKeyValue === activeKey) {
       setReplyingTo(null);
@@ -2776,6 +3321,38 @@ export default function App() {
   
   function closeLightbox() {
     setLightbox(null);
+  }
+
+  function clearCurrentGroupConversationForMe() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:clear-for-me',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete group chat for you');
+        }
+      }
+    );
+  }
+  
+  function deleteCurrentGroupConversationForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:delete',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete group chat for everyone');
+        }
+      }
+    );
   }
   
   function showPrevLightbox() {
@@ -2827,6 +3404,10 @@ export default function App() {
 
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
+  }
+
+  function isGroupMember(group: GroupChat | null, userId?: string | null) {
+    return !!group && !!userId && group.memberIds.includes(userId);
   }
 
   function isFileDrag(event: React.DragEvent | DragEvent) {
@@ -3351,8 +3932,8 @@ export default function App() {
   }, [unreadCountByUser, unreadCountByGroup]);
 
   const totalAppBadgeCount = useMemo(() => {
-    return totalUnreadCount + unreadNotificationCount;
-  }, [totalUnreadCount, unreadNotificationCount]);
+    return totalUnreadCount;
+  }, [totalUnreadCount]);
   
   const activeMessages = useMemo(() => {
     if (!me) return [] as Message[];
@@ -3468,6 +4049,39 @@ export default function App() {
   const selectedGroup = useMemo(() => {
     return groups.find((g) => g.id === selectedGroupId) || null;
   }, [groups, selectedGroupId]);  
+
+  const canSeeGeneralGroupTab =
+  !!me && !!selectedGroup && isGroupAdmin(selectedGroup, me.id);
+
+  const selectedGroupMembers = useMemo(() => {
+    if (!selectedGroup) return [] as User[];
+    return selectedGroup.memberIds
+      .map((id) => users.find((u) => u.id === id))
+      .filter(Boolean) as User[];
+  }, [selectedGroup, users]);
+  
+  const selectedGroupInviteCandidates = useMemo(() => {
+    if (!selectedGroup || !me) return [] as User[];
+  
+    return users.filter((user) => {
+      if (user.id === me.id) return false;
+      if (selectedGroup.memberIds.includes(user.id)) return false;
+      if (selectedGroup.invitedUserIds.includes(user.id)) return false;
+      if (selectedGroup.joinRequestUserIds.includes(user.id)) return false;
+      return true;
+    });
+  }, [selectedGroup, users, me]);
+  
+  const pendingGroupInvites = useMemo(() => {
+    return [...groupInvites].sort((a, b) => b.createdAt - a.createdAt);
+  }, [groupInvites]);
+  
+  const pendingGroupJoinApprovals = useMemo(() => {
+    if (!selectedGroup) return [] as User[];
+    return selectedGroup.joinRequestUserIds
+      .map((id) => users.find((u) => u.id === id))
+      .filter(Boolean) as User[];
+  }, [selectedGroup, users]);
   
   const activeGroupTypingUsers = useMemo(() => {
     if (selectedChatKind !== 'group' || !selectedGroupId) return [] as string[];
@@ -3496,6 +4110,15 @@ export default function App() {
     if (!selectedUserId) return;
     void loadHistory(selectedUserId);
   }, [selectedUserId, selectedGroupId, selectedChatKind, me, connectedServerUrl]);
+
+  useEffect(() => {
+    if (!groupManageOpen || !selectedGroup || !me) return;
+  
+    setGroupManageTab(
+      isGroupAdmin(selectedGroup, me.id) ? 'general' : 'members'
+    );
+    setGroupEditTitle(selectedGroup.title || '');
+  }, [groupManageOpen, selectedGroup, me]);
 
   useEffect(() => {
     if (!replyingTo) return;
@@ -3855,22 +4478,98 @@ export default function App() {
           <button
             className={`tab ${activeSidebarTab === 'chats' ? 'active' : ''}`}
             onClick={() => setActiveSidebarTab('chats')}
+            title="Chats"
+            aria-label="Chats"
           >
-            Chats
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M7 18L3.5 20.5L4.5 16.5C3.6 15.3 3 13.8 3 12C3 7.6 7 4 12 4C17 4 21 7.6 21 12C21 16.4 17 20 12 20C10.2 20 8.5 19.3 7 18Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
           </button>
 
           <button
             className={`tab ${activeSidebarTab === 'calls' ? 'active' : ''}`}
             onClick={() => setActiveSidebarTab('calls')}
+            title="Calls"
+            aria-label="Calls"
           >
-            Calls
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M6.6 4.8L9.3 4C9.7 3.9 10.2 4.1 10.4 4.5L11.7 7.6C11.9 8 11.8 8.5 11.4 8.8L9.9 10C10.8 11.9 12.1 13.2 14 14.1L15.2 12.6C15.5 12.2 16 12.1 16.4 12.3L19.5 13.6C19.9 13.8 20.1 14.3 20 14.7L19.2 17.4C19.1 17.8 18.7 18 18.3 18C10.9 18 6 13.1 6 5.7C6 5.3 6.2 4.9 6.6 4.8Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+          </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'invitations' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('invitations')}
+            title="Invitations"
+            aria-label="Invitations"
+          >
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 7.5C4 6.7 4.7 6 5.5 6H18.5C19.3 6 20 6.7 20 7.5V16.5C20 17.3 19.3 18 18.5 18H5.5C4.7 18 4 17.3 4 16.5V7.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M5 7L12 12L19 7"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+
+              {invitationCount > 0 ? (
+                <span className="tab-badge">
+                  {invitationCount > 99 ? '99+' : invitationCount}
+                </span>
+              ) : null}
+            </span>
           </button>
 
           <button
             className={`tab ${activeSidebarTab === 'notifications' ? 'active' : ''}`}
             onClick={() => setActiveSidebarTab('notifications')}
+            title="Notifications"
+            aria-label="Notifications"
           >
-            Notifications{unreadNotificationCount > 0 ? ` (${unreadNotificationCount})` : ''}
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M12 20C13.1 20 14 19.1 14 18H10C10 19.1 10.9 20 12 20Z"
+                  fill="currentColor"
+                />
+                <path
+                  d="M6 17H18L16.8 15.4V11C16.8 8.2 14.9 6 12.4 5.4V4.8C12.4 4.4 12.1 4 11.7 4C11.3 4 11 4.4 11 4.8V5.4C8.5 6 6.6 8.2 6.6 11V15.4L6 17Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+
+              {unreadNotificationCount > 0 ? (
+                <span className="tab-badge">
+                  {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
+                </span>
+              ) : null}
+            </span>
           </button>
         </div>
 
@@ -4028,6 +4727,79 @@ export default function App() {
                 <div className="admin-empty">No call history yet.</div>
               )}
             </div>
+          ) : activeSidebarTab === 'invitations' ? (
+            <div className="contact-group">
+              <div className="contact-group-title">Group invitations</div>
+          
+              {pendingGroupInvites.length ? (
+  pendingGroupInvites.map((invite) => {
+    const isRequested = invite.status === 'requested';
+
+    return (
+      <div
+        key={`${invite.groupId}_${invite.status}`}
+        className="admin-user-row invitation-row"
+      >
+        <div className="admin-user-main invitation-main">
+          <UserAvatar
+            user={{
+              id: invite.groupId,
+              userId: invite.title,
+              name: invite.title,
+              avatarUrl: invite.avatarUrl || null
+            }}
+            serverUrl={connectedServerUrl}
+            size="small"
+          />
+          <div className="invitation-text">
+            <div className="contact-name">{invite.title}</div>
+            <div className="contact-preview invitation-preview">
+              {isRequested
+                ? 'Waiting for owner approval'
+                : 'You have been invited to this group'}
+            </div>
+          </div>
+        </div>
+
+        <div className="invitation-actions">
+          {isRequested ? (
+            <button
+              className="icon-btn wide"
+              onClick={() => {
+                void declineGroupInvite(invite.groupId);
+              }}
+            >
+              Cancel
+            </button>
+          ) : (
+            <>
+              <button
+                className="icon-btn wide"
+                onClick={() => {
+                  void declineGroupInvite(invite.groupId);
+                }}
+              >
+                Decline
+              </button>
+
+              <button
+                className="primary invitation-accept-btn"
+                onClick={() => {
+                  void acceptGroupInvite(invite.groupId);
+                }}
+              >
+                Accept
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  })
+              ) : (
+                <div className="admin-empty">No invitations yet.</div>
+              )}
+            </div>
           ) : (
             <div className="contact-group">
               <div
@@ -4040,7 +4812,7 @@ export default function App() {
                 }}
               >
                 <span>Notifications</span>
-
+          
                 <button
                   type="button"
                   className="icon-btn small"
@@ -4053,36 +4825,49 @@ export default function App() {
                   Clear
                 </button>
               </div>
-
+          
               {notifications.length ? (
                 notifications.map((item) => {
-                  const matchedUser = users.find((u) => u.id === item.userId);
+                  const matchedUser = item.userId
+                    ? users.find((u) => u.id === item.userId)
+                    : null;
+
+                  const matchedGroup = item.groupId
+                    ? groups.find((g) => g.id === item.groupId)
+                    : null;
+
+                  const avatarUser =
+                    item.kind === 'group'
+                      ? {
+                          id: item.groupId || item.id,
+                          userId: matchedGroup?.title || item.title,
+                          name: matchedGroup?.title || item.title,
+                          avatarUrl: matchedGroup?.avatarUrl || item.avatarUrl || null
+                        }
+                      : {
+                          id: item.userId || item.id,
+                          userId: matchedUser?.userId || item.userName,
+                          name: matchedUser?.name || item.userName,
+                          avatarUrl: matchedUser?.avatarUrl || item.avatarUrl || null
+                        };
+
+                  const heading = item.kind === 'group' ? item.title : item.userName;
 
                   return (
                     <div key={item.id} className="contact-card">
                       <div className="contact-avatar-wrap">
-                        <UserAvatar
-                          user={{
-                            id: item.userId,
-                            userId: matchedUser?.userId || item.userName,
-                            name: matchedUser?.name || item.userName,
-                            avatarUrl: matchedUser?.avatarUrl || item.avatarUrl || null
-                          }}
-                          serverUrl={connectedServerUrl}
-                        />
+                        <UserAvatar user={avatarUser} serverUrl={connectedServerUrl} />
                       </div>
 
                       <div className="contact-text">
                         <div className="contact-head">
-                          <span className="contact-name">{item.userName}</span>
+                          <span className="contact-name">{heading}</span>
                           <div className="contact-head-right">
                             <span className="contact-time">{timeLabel(item.createdAt)}</span>
                           </div>
                         </div>
 
-                        <div className="contact-preview">
-                          {item.kind === 'login' ? 'Logged in' : 'Logged out'}
-                        </div>
+                        <div className="contact-preview">{notificationText(item)}</div>
                       </div>
                     </div>
                   );
@@ -4132,6 +4917,26 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+              
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="header-actions">
+                      <button
+                        className="icon-btn"
+                        onClick={() => setDeleteGroupChatTargetId(selectedGroup.id)}
+                        title="Delete chat"
+                      >
+                        🗑
+                      </button>
+                    
+                      <button
+                        className="icon-btn"
+                        onClick={() => setGroupManageOpen(true)}
+                        title="Manage group"
+                      >
+                        ⚙
+                      </button>
+                    </div>
+                  ) : null}
                 </>
               ) : selectedUser ? (
                 <>
@@ -4526,74 +5331,6 @@ export default function App() {
         ) : null}
       </main>
 
-      {deleteChatTarget ? (
-        <div className="call-overlay">
-          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
-            <div className="call-top">
-              <div>
-                <div className="call-name">Delete chat</div>
-                <div className="call-sub">Choose how to delete chat with {deleteChatTarget.name}</div>
-              </div>
-            </div>
-
-            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
-              Delete for me hides the current chat only on your app.
-              <br />
-              Delete for everyone removes the chat history for both users.
-            </div>
-
-            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
-              <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
-                Cancel
-              </button>
-              <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
-                Delete for me
-              </button>
-              <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
-                Delete for everyone
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {deleteMessageTarget ? (
-        <div className="call-overlay">
-          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
-            <div className="call-top">
-              <div>
-                <div className="call-name">Delete message</div>
-                <div className="call-sub">
-                  Choose how to delete this message
-                </div>
-              </div>
-            </div>
-
-            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
-              Delete for me hides this message only on your app.
-              <br />
-              {deleteMessageTarget.fromUserId === me.id
-                ? 'Delete for everyone replaces the message for both users.'
-                : 'You can delete this message for yourself.'}
-            </div>
-
-            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
-              <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
-                Cancel
-              </button>
-              <button className="icon-btn wide" onClick={clearMessageForMe}>
-                Delete for me
-              </button>
-              {deleteMessageTarget.fromUserId === me.id ? (
-                <button className="danger wide" onClick={deleteMessageForEveryone}>
-                  Delete for everyone
-                </button>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
       {incomingFromUserId ? (
         <div className="incoming-box tg-incoming-call">
           <div className="tg-incoming-call-top">
@@ -4931,6 +5668,7 @@ export default function App() {
                         groups?: GroupChat[];
                         onlineUserIds: string[];
                         idleUserIds: string[];
+                        groupInvites: GroupInvite[];
                         activeChatTargets?: Record<string, string | null>;
                       }) => {
                         setUsers(payload.users || []);
@@ -4938,6 +5676,7 @@ export default function App() {
                         setOnlineUserIds(payload.onlineUserIds || []);
                         setIdleUserIds(payload.idleUserIds || []);
                         setActiveChatTargets(payload.activeChatTargets || {});
+                        setGroupInvites(payload.groupInvites || []);
 
                         await loadAllHistories(payload.users || [], undefined, payload.groups || []);
                       }
@@ -5173,6 +5912,405 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      {groupManageOpen && selectedGroup ? (
+        <div className="call-overlay">
+          <div className="call-modal admin-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Manage Group</div>
+                <div className="call-sub">{selectedGroup.title}</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <div className="group-manage-tabs">
+                {canSeeGeneralGroupTab ? (
+                  <button
+                    className={`group-manage-tab ${groupManageTab === 'general' ? 'active' : ''}`}
+                    onClick={() => setGroupManageTab('general')}
+                  >
+                    General
+                  </button>
+                ) : null}
+
+                <button
+                  className={`group-manage-tab ${groupManageTab === 'members' ? 'active' : ''}`}
+                  onClick={() => setGroupManageTab('members')}
+                >
+                  Members
+                </button>
+              </div>
+
+              {groupManageTab === 'general' && canSeeGeneralGroupTab ? (
+                <>
+                  <div className="group-manage-section">
+                    <div className="contact-group-title">Group info</div>
+
+                    <div className="settings-avatar-row">
+                      <UserAvatar
+                        user={{
+                          id: selectedGroup.id,
+                          userId: selectedGroup.title,
+                          name: selectedGroup.title,
+                          avatarUrl: selectedGroup.avatarUrl || null
+                        }}
+                        serverUrl={connectedServerUrl}
+                        size="large"
+                      />
+
+                      {isGroupAdmin(selectedGroup, me.id) ? (
+                        <label className="primary upload-btn">
+                          Upload group avatar
+                          <input
+                            type="file"
+                            accept="image/*"
+                            hidden
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              void uploadGroupAvatar(selectedGroup.id, file);
+                            }}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+
+                    <label className="field">
+                      <span>Group name</span>
+                      <input
+                        value={groupEditTitle}
+                        onChange={(e) => setGroupEditTitle(e.target.value)}
+                        disabled={!isGroupAdmin(selectedGroup, me.id)}
+                        placeholder="Group name"
+                      />
+                    </label>
+
+                    {isGroupAdmin(selectedGroup, me.id) ? (
+                      <div className="settings-actions">
+                        <button
+                          className="primary"
+                          onClick={() => {
+                            void updateGroupTitle(selectedGroup.id, groupEditTitle);
+                          }}
+                        >
+                          Save group name
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="contact-preview">
+                        Only group admins can change the group name or avatar.
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {isGroupOwner(selectedGroup, me.id) ? (
+                    <div className="group-manage-section">
+                      <div className="contact-group-title">Pending join approvals</div>
+
+                      <div className="admin-user-list">
+                        {pendingGroupJoinApprovals.length ? (
+                          pendingGroupJoinApprovals.map((user) => (
+                            <div key={user.id} className="admin-user-row">
+                              <div className="admin-user-main">
+                                <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                                <div>
+                                  <div className="contact-name">{user.name}</div>
+                                  <div className="contact-preview">@{user.userId}</div>
+                                </div>
+                              </div>
+
+                              <div className="admin-user-perms">
+                                <button
+                                  className="icon-btn wide"
+                                  onClick={() => {
+                                    void rejectGroupJoinRequest(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Reject
+                                </button>
+
+                                <button
+                                  className="primary"
+                                  onClick={() => {
+                                    void approveGroupJoinRequest(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Approve
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="admin-empty">No pending requests.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="group-manage-section">
+                      <div className="contact-group-title">Invite users</div>
+
+                      <div className="admin-user-list">
+                        {selectedGroupInviteCandidates.length ? (
+                          selectedGroupInviteCandidates.map((user) => (
+                            <div key={user.id} className="admin-user-row">
+                              <div className="admin-user-main">
+                                <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                                <div>
+                                  <div className="contact-name">{user.name}</div>
+                                  <div className="contact-preview">@{user.userId}</div>
+                                </div>
+                              </div>
+
+                              <button
+                                className="primary"
+                                onClick={() => {
+                                  void inviteUserToGroup(selectedGroup.id, user.id);
+                                }}
+                              >
+                                Invite
+                              </button>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="admin-empty">No available users to invite.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="group-manage-section group-manage-danger-section">
+                      <div className="contact-group-title">
+                        {isGroupOwner(selectedGroup, me.id) ? 'Delete group' : 'Leave group'}
+                      </div>
+
+                      <div className="contact-preview group-manage-danger-copy">
+                        {isGroupOwner(selectedGroup, me.id)
+                          ? 'As the owner, you cannot leave this group. Deleting it will remove the group for all members.'
+                          : 'Leave this group and stop receiving its messages. The group will remain available for the other members.'}
+                      </div>
+
+                      <div className="group-manage-danger-actions">
+                        {isGroupOwner(selectedGroup, me.id) ? (
+                          <button
+                            className="danger wide"
+                            onClick={() => {
+                              setGroupConfirmDialog({
+                                mode: 'delete',
+                                groupId: selectedGroup.id,
+                                title: selectedGroup.title
+                              });
+                            }}
+                          >
+                            Delete group
+                          </button>
+                        ) : (
+                          <button
+                            className="danger wide"
+                            onClick={() => {
+                              setGroupConfirmDialog({
+                                mode: 'leave',
+                                groupId: selectedGroup.id,
+                                title: selectedGroup.title
+                              });
+                            }}
+                          >
+                            Leave group
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="group-manage-section">
+                    <div className="contact-group-title">Members</div>
+
+                    <div className="admin-user-list">
+                      {selectedGroupMembers.map((user) => {
+                        const isOwner = selectedGroup.ownerUserId === user.id;
+                        const isAdminUser = selectedGroup.adminUserIds.includes(user.id);
+
+                        return (
+                          <div key={user.id} className="admin-user-row">
+                            <div className="admin-user-main">
+                              <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                              <div>
+                                <div className="contact-name">{user.name}</div>
+                                <div className="contact-preview">
+                                  @{user.userId}
+                                  {isOwner
+                                    ? ' · Owner'
+                                    : isAdminUser
+                                    ? ' · Admin'
+                                    : ' · Member'}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="admin-user-perms">
+                              {isGroupOwner(selectedGroup, me.id) && !isOwner ? (
+                                <button
+                                  className="icon-btn wide"
+                                  onClick={() => {
+                                    void setUserAdminRole(
+                                      selectedGroup.id,
+                                      user.id,
+                                      !isAdminUser
+                                    );
+                                  }}
+                                >
+                                  {isAdminUser ? 'Remove admin' : 'Make admin'}
+                                </button>
+                              ) : null}
+
+                              {isGroupAdmin(selectedGroup, me.id) && !isOwner && user.id !== me.id ? (
+                                <button
+                                  className="danger wide"
+                                  onClick={() => {
+                                    void removeGroupMember(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setGroupManageOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      
+      <ConfirmModal
+  open={!!deleteChatTarget}
+  title="Delete chat"
+  subtitle={deleteChatTarget ? `Choose how to delete chat with ${deleteChatTarget.name}` : ''}
+  onClose={() => setDeleteChatTargetUserId(null)}
+  actions={
+    <>
+      <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
+        Cancel
+      </button>
+      <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
+        Delete for me
+      </button>
+      <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
+        Delete for everyone
+      </button>
+    </>
+  }
+>
+  <>
+    Delete for me hides the current chat only on your app.
+    <br />
+    Delete for everyone removes the chat history for both users.
+  </>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!deleteMessageTarget}
+        title="Delete message"
+        subtitle="Choose how to delete this message"
+        onClose={() => setDeleteMessageTargetId(null)}
+        actions={
+          <>
+            <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
+              Cancel
+            </button>
+            <button className="icon-btn wide" onClick={clearMessageForMe}>
+              Delete for me
+            </button>
+            {deleteMessageTarget?.fromUserId === me.id ? (
+              <button className="danger wide" onClick={deleteMessageForEveryone}>
+                Delete for everyone
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <>
+          Delete for me hides this message only on your app.
+          <br />
+          {deleteMessageTarget?.fromUserId === me.id
+            ? 'Delete for everyone replaces the message for both users.'
+            : 'You can delete this message for yourself.'}
+        </>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!groupConfirmDialog}
+        title={groupConfirmDialog?.mode === 'delete' ? 'Delete group' : 'Leave group'}
+        subtitle={groupConfirmDialog?.title || ''}
+        onClose={() => setGroupConfirmDialog(null)}
+        confirmText={groupConfirmDialog?.mode === 'delete' ? 'Delete group' : 'Leave group'}
+        confirmClassName="danger wide"
+        onConfirm={() => {
+          void confirmGroupDangerAction();
+        }}
+      >
+        {groupConfirmDialog?.mode === 'delete'
+          ? 'This will permanently remove the group and its messages for all members.'
+          : 'You will leave this group and stop receiving its messages. Other members will stay in the group.'}
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!deleteGroupChatTarget}
+        title="Delete group chat"
+        subtitle={
+          deleteGroupChatTarget
+            ? `Choose how to delete chat in ${deleteGroupChatTarget.title}`
+            : ''
+        }
+        onClose={() => setDeleteGroupChatTargetId(null)}
+        actions={
+          <>
+            <button className="icon-btn wide" onClick={() => setDeleteGroupChatTargetId(null)}>
+              Cancel
+            </button>
+
+            <button className="icon-btn wide" onClick={clearCurrentGroupConversationForMe}>
+              Delete for me
+            </button>
+
+            <button className="icon-btn wide" onClick={deleteOwnGroupMessagesForEveryone}>
+              Delete my messages for everyone
+            </button>
+
+            {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id) ? (
+              <button className="danger wide" onClick={clearGroupChatForEveryone}>
+                Clear chat
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <>
+          Delete for me hides this group chat only on your app.
+          <br />
+          Delete my messages for everyone removes all messages you sent in this group for all members.
+          <br />
+          {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id)
+            ? 'Clear chat removes all group messages for every member.'
+            : 'Only the group owner can clear the whole group chat for everyone.'}
+        </>
+      </ConfirmModal>
 
       {toast ? (
         <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
