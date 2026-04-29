@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 const FIXED_SERVER_URL = 'http://172.16.67.6:4000';
@@ -24,6 +24,38 @@ type Attachment = {
   isImage: boolean;
 };
 
+type GroupChat = {
+  id: string;
+  title: string;
+  avatarUrl?: string | null;
+  ownerUserId?: string | null;
+  memberIds: string[];
+  adminUserIds: string[];
+  invitedUserIds: string[];
+  joinRequestUserIds: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+type GroupNotice = {
+  id: string;
+  kind: 'info' | 'deleted';
+  groupId: string;
+  title: string;
+  message: string;
+  createdAt: number;
+};
+
+type GroupInvite = {
+  groupId: string;
+  title: string;
+  avatarUrl?: string | null;
+  ownerUserId?: string | null;
+  adminUserIds: string[];
+  status: 'invited' | 'requested';
+  createdAt: number;
+};
+
 type ReplyTo = {
   messageId: string;
   fromUserId: string;
@@ -31,6 +63,14 @@ type ReplyTo = {
   attachmentName: string | null;
   isImage: boolean;
 };
+
+type GroupConfirmDialog =
+  | {
+      mode: 'leave' | 'delete';
+      groupId: string;
+      title: string;
+    }
+  | null;
 
 type ToastTone = 'info' | 'success' | 'error';
 
@@ -40,17 +80,19 @@ type AppToast = {
   tone: ToastTone;
 };
 
-type CallMode = 'audio' | 'video';
-
-type GroupChat = {
+type AppNotification = {
   id: string;
+  kind: 'login' | 'logout' | 'group';
+  userId: string | null;
+  userName: string;
   title: string;
+  body: string;
   avatarUrl?: string | null;
-  ownerUserId?: string | null;
-  memberIds: string[];
+  groupId?: string | null;
   createdAt: number;
-  updatedAt: number;
 };
+
+type CallMode = 'audio' | 'video';
 
 type Message = {
   id: string;
@@ -82,9 +124,10 @@ type Message = {
   deletedByUserId: string | null;
   deliveredAt: number | null;
   readAt: number | null;
+  groupReadByUserIds: string[] | null;
 };
 
-type SidebarTab = 'chats' | 'calls';
+type SidebarTab = 'chats' | 'calls' | 'notifications' | 'invitations';
 
 type PendingUpload = {
   id: string;
@@ -95,6 +138,30 @@ type PendingUpload = {
   isImage: boolean;
   previewUrl: string | null;
 };
+
+type ContactListItem =
+  | {
+      kind: 'group';
+      id: string;
+      title: string;
+      group: GroupChat;
+      last?: Message;
+      unreadCount: number;
+      typingText: string;
+      sortAt: number;
+    }
+  | {
+      kind: 'direct';
+      id: string;
+      title: string;
+      user: User;
+      last?: Message;
+      unreadCount: number;
+      typingText: string;
+      presence: 'online' | 'idle' | 'offline';
+      selectedTogether: boolean;
+      sortAt: number;
+    };
 
 type LightboxState =
   | {
@@ -621,6 +688,89 @@ function ImageLightbox({
   );
 }
 
+function ConfirmModal({
+  open,
+  title,
+  subtitle,
+  children,
+  onClose,
+  onConfirm,
+  confirmText = 'Confirm',
+  cancelText = 'Cancel',
+  confirmClassName = 'danger wide',
+  width = 'min(480px, calc(100% - 32px))',
+  actions
+}: {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: ReactNode;
+  onClose: () => void;
+  onConfirm?: () => void;
+  confirmText?: string;
+  cancelText?: string;
+  confirmClassName?: string;
+  width?: string;
+  actions?: ReactNode;
+}) {
+  useEffect(() => {
+    if (!open) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="call-overlay" onClick={onClose}>
+      <div
+        className="call-modal"
+        style={{ width }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="call-top">
+          <div>
+            <div className="call-name">{title}</div>
+            {subtitle ? <div className="call-sub">{subtitle}</div> : null}
+          </div>
+        </div>
+
+        <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
+          {children}
+        </div>
+
+        <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+          {actions ? (
+            actions
+          ) : (
+            <>
+              <button className="icon-btn wide" onClick={onClose}>
+                {cancelText}
+              </button>
+
+              <button
+                className={confirmClassName}
+                onClick={() => {
+                  onConfirm?.();
+                }}
+              >
+                {confirmText}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function UserAvatar({
   user,
   serverUrl,
@@ -648,6 +798,50 @@ function UserAvatar({
       {getInitials(user.name || user.userId)}
     </div>
   );
+}
+
+function notificationText(item: AppNotification) {
+  if (item.body) return item.body;
+
+  if (item.kind === 'login') {
+    return `${item.userName} logged in`;
+  }
+
+  if (item.kind === 'logout') {
+    return `${item.userName} logged out`;
+  }
+
+  return item.title || 'Group update';
+}
+
+function playPresenceNotificationSound() {
+  try {
+    const AudioContextCtor =
+      window.AudioContext || (window as any).webkitAudioContext;
+
+    if (!AudioContextCtor) return;
+
+    const ctx = new AudioContextCtor();
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(880, ctx.currentTime);
+
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.08, ctx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.22);
+
+    oscillator.connect(gain);
+    gain.connect(ctx.destination);
+
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 0.24);
+
+    oscillator.onended = () => {
+      void ctx.close().catch(() => undefined);
+    };
+  } catch {}
 }
 
 export default function App() {
@@ -688,6 +882,9 @@ export default function App() {
   const [incomingCallMode, setIncomingCallMode] = useState<CallMode | null>(null);
   const incomingCallModeRef = useRef<CallMode | null>(null);
   const [activeSidebarTab, setActiveSidebarTab] = useState<SidebarTab>('chats');
+
+  const [groupInvites, setGroupInvites] = useState<GroupInvite[]>([]);
+  const [groupManageOpen, setGroupManageOpen] = useState(false);
 
   const [groups, setGroups] = useState<GroupChat[]>([]);
   const [selectedChatKind, setSelectedChatKind] = useState<'direct' | 'group'>('direct');
@@ -744,6 +941,18 @@ export default function App() {
   const [activeChatTargets, setActiveChatTargets] = useState<Record<string, string | null>>({});
   const [hasExplicitContactSelection, setHasExplicitContactSelection] = useState(false);
   const [isSocketAuthed, setIsSocketAuthed] = useState(false);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  const activeSidebarTabRef = useRef<SidebarTab>('chats');
+  const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false);
+  const sidebarMenuRef = useRef<HTMLDivElement | null>(null);
+  const [groupManageTab, setGroupManageTab] = useState<'general' | 'members'>('general');
+  const [groupEditTitle, setGroupEditTitle] = useState('');
+  const [groupConfirmDialog, setGroupConfirmDialog] = useState<GroupConfirmDialog>(null);
+
+  const [deleteGroupChatTargetId, setDeleteGroupChatTargetId] = useState<string | null>(null);
+  const deleteGroupChatTarget =
+    groups.find((g) => g.id === deleteGroupChatTargetId) || null;
 
   const desktopApi = window.desktop ?? {
     getConfig: async () => ({
@@ -799,6 +1008,64 @@ export default function App() {
   useEffect(() => {
     pendingUploadsRef.current = pendingUploads;
   }, [pendingUploads]);
+
+  useEffect(() => {
+    activeSidebarTabRef.current = activeSidebarTab;
+  }, [activeSidebarTab]);
+
+  useEffect(() => {
+    if (!groupManageOpen) {
+      setGroupConfirmDialog(null);
+    }
+  }, [groupManageOpen]);
+  
+  useEffect(() => {
+    setGroupConfirmDialog(null);
+  }, [selectedGroupId]);
+
+  useEffect(() => {
+    setReplyingTo(null);
+    setDeleteChatTargetUserId(null);
+    setDeleteGroupChatTargetId(null);
+    setDeleteMessageTargetId(null);
+    setIncomingCallMode(null);
+    incomingCallModeRef.current = null;
+    clearPendingUploads();
+    setLightbox(null);
+  
+    suppressAutoReadUntilBottomRef.current = false;
+    hasUserScrolledCurrentChatRef.current = false;
+  }, [selectedUserId, selectedGroupId, selectedChatKind]);
+
+  useEffect(() => {
+    function handleOutsideClick(event: MouseEvent) {
+      if (!sidebarMenuRef.current) return;
+  
+      if (!sidebarMenuRef.current.contains(event.target as Node)) {
+        setSidebarMenuOpen(false);
+      }
+    }
+  
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setSidebarMenuOpen(false);
+      }
+    }
+  
+    window.addEventListener('mousedown', handleOutsideClick);
+    window.addEventListener('keydown', handleEscape);
+  
+    return () => {
+      window.removeEventListener('mousedown', handleOutsideClick);
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (activeSidebarTab === 'notifications') {
+      setUnreadNotificationCount(0);
+    }
+  }, [activeSidebarTab]);
   
   useEffect(() => {
     return () => {
@@ -980,19 +1247,6 @@ export default function App() {
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    setReplyingTo(null);
-    setDeleteChatTargetUserId(null);
-    setDeleteMessageTargetId(null);
-    setIncomingCallMode(null);
-    incomingCallModeRef.current = null;
-    clearPendingUploads();
-    setLightbox(null);
-  
-    suppressAutoReadUntilBottomRef.current = false;
-    hasUserScrolledCurrentChatRef.current = false;
-  }, [selectedUserId, selectedGroupId, selectedChatKind]);
-
   async function handleRegister() {
     if (!loginUserId.trim()) {
       showError('Enter user ID');
@@ -1061,11 +1315,15 @@ export default function App() {
     setProfileName(loginData.user.name || '');
     setActiveChatTargets(loginData.activeChatTargets || {});
     setHasExplicitContactSelection(false);
+    setNotifications(loginData.notifications || []);
+    setGroupInvites(loginData.groupInvites || []);
 
     setIsSocketAuthed(false);
     setSelectedChatKind('direct');
     setSelectedUserId('');
     setSelectedGroupId('');
+    setActiveSidebarTab('chats');
+    setUnreadNotificationCount(0);
   
     socketRef.current?.disconnect();
   
@@ -1087,7 +1345,9 @@ export default function App() {
         setIdleUserIds(payload.idleUserIds || []);
         setActiveChatTargets(payload.activeChatTargets || {});
         setHasExplicitContactSelection(false);
-  
+        setNotifications(payload.notifications || []);
+        setGroupInvites(payload.groupInvites || []);
+
         const historyMap = await loadAllHistories(
           payload.users || [],
           loginData.token,
@@ -1135,6 +1395,10 @@ export default function App() {
       setMe(null);
       meRef.current = null;
       setAuthToken('');
+      setNotifications([]);
+      setGroupInvites([]);
+      setUnreadNotificationCount(0);
+      setActiveSidebarTab('chats');
     });
   
     socket.on(
@@ -1205,6 +1469,28 @@ export default function App() {
         setActiveChatTargets(activeChatTargets || {});
       }
     );
+
+    socket.on('group:notice', (notice: GroupNotice) => {
+      const isCurrentGroup =
+        selectedChatKindRef.current === 'group' &&
+        selectedGroupIdRef.current === notice.groupId;
+    
+      if (!isCurrentGroup || notice.kind === 'deleted') {
+        showToast(notice.message, 'info', 3600);
+      }
+    
+      if (!isWindowActiveRef.current || !isCurrentGroup) {
+        desktopApi.notify({
+          title: notice.title || 'Group update',
+          body: notice.message
+        });
+      }
+    
+      if (notice.kind === 'deleted') {
+        setGroupManageOpen(false);
+        setGroupConfirmDialog(null);
+      }
+    });
   
     socket.on('users:changed', () => {
       socket.emit(
@@ -1215,12 +1501,14 @@ export default function App() {
           idleUserIds: string[];
           activeChatTargets?: Record<string, string | null>;
           groups?: GroupChat[];
+          groupInvites?: GroupInvite[];
         }) => {
           setUsers(payload.users || []);
           setGroups(payload.groups || []);
           setOnlineUserIds(payload.onlineUserIds || []);
           setIdleUserIds(payload.idleUserIds || []);
           setActiveChatTargets(payload.activeChatTargets || {});
+          setGroupInvites(payload.groupInvites || []);
   
           const historyMap = await loadAllHistories(
             payload.users || [],
@@ -1254,12 +1542,43 @@ export default function App() {
     });
   
     socket.on(
+      'group:read:update',
+      ({
+        groupId,
+        userId,
+        messageIds
+      }: {
+        groupId: string;
+        userId: string;
+        messageIds: string[];
+      }) => {
+        applyGroupReadUpdate(groupId, userId, messageIds);
+      }
+    );
+
+    socket.on(
       'presence:update',
       (payload: { onlineUserIds: string[]; idleUserIds: string[] }) => {
         setOnlineUserIds(payload.onlineUserIds || []);
         setIdleUserIds(payload.idleUserIds || []);
       }
     );
+    
+    socket.on('notification:new', (item: AppNotification) => {
+      if (item.kind !== 'group' && item.userId === loginData.user.id) return;
+    
+      setNotifications((prev) => [item, ...prev].slice(0, 200));
+    
+      if (item.kind === 'login' || item.kind === 'logout') {
+        playPresenceNotificationSound();
+      }
+    
+      showToast(notificationText(item), 'info', 3200);
+    
+      if (activeSidebarTabRef.current !== 'notifications') {
+        setUnreadNotificationCount((prev) => prev + 1);
+      }
+    });
   
     socket.on('message:new', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -1269,6 +1588,17 @@ export default function App() {
         const next = [...(prev[key] || []), message];
         return { ...prev, [key]: next };
       });
+
+      if (
+        message.groupId &&
+        message.fromUserId !== loginData.user.id &&
+        selectedChatKindRef.current === 'group' &&
+        selectedGroupIdRef.current === message.groupId &&
+        isWindowActiveRef.current &&
+        isMessagesNearBottom()
+      ) {
+        markUnreadGroupMessagesAsRead(message.groupId, [...activeMessagesRef.current, message]);
+      }
   
       const isNormalNotifyMessage = ['text', 'file', 'gallery'].includes(message.type);
 
@@ -1317,6 +1647,40 @@ export default function App() {
         }
       }
     });
+
+    socket.on(
+      'group:conversation:cleared-for-me',
+      ({
+        conversationKey: clearedConversationKey
+      }: {
+        groupId: string;
+        conversationKey: string;
+        userId: string;
+        clearedAt: number;
+      }) => {
+        clearConversationLocally(clearedConversationKey);
+        setDeleteGroupChatTargetId(null);
+      }
+    );
+    
+    socket.on(
+      'group:conversation:deleted',
+      ({
+        conversationKey: deletedConversationKey,
+        byUserId
+      }: {
+        groupId: string;
+        conversationKey: string;
+        byUserId: string;
+      }) => {
+        clearConversationLocally(deletedConversationKey);
+        setDeleteGroupChatTargetId(null);
+    
+        if (byUserId !== meRef.current?.id) {
+          showToast(`${userNameFromList(byUserId, usersRef.current)} cleared the group chat`, 'info', 3200);
+        }
+      }
+    );
   
     socket.on('message:deleted', (message: Message) => {
       setMessagesByConv((prev) => {
@@ -1517,6 +1881,317 @@ export default function App() {
     );
   }
 
+  async function handleLogout() {
+    setSidebarMenuOpen(false);
+  
+    try {
+      await flushCurrentGroupReadBeforeLogout();
+    } catch {}
+  
+    try {
+      await apiFetch('/api/logout', { method: 'POST' });
+    } catch {}
+  
+    cleanupCall(true);
+    socketRef.current?.disconnect();
+    localStorage.removeItem('lan_chat_auth_token');
+    meRef.current = null;
+    setActiveChatTargets({});
+    setHasExplicitContactSelection(false);
+    setMessagesByConv({});
+    setNotifications([]);
+    setGroupInvites([]);
+    setUnreadNotificationCount(0);
+    setActiveSidebarTab('chats');
+    setMe(null);
+    setAuthToken('');
+    setIsSocketAuthed(false);
+    setSelectedUserId('');
+    setSelectedGroupId('');
+    setSelectedChatKind('direct');
+  }
+
+  async function inviteUserToGroup(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to invite user');
+      return;
+    }
+  
+    if (data.requiresOwnerApproval) {
+      showSuccess('Invitation sent. Owner approval will be required after acceptance.');
+    } else {
+      showSuccess('Invitation sent. User can join immediately after acceptance.');
+    }
+  }
+  
+  async function acceptGroupInvite(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite/accept`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to accept invite');
+      return;
+    }
+  
+    setGroupInvites((prev) => prev.filter((item) => item.groupId !== groupId));
+  
+    if (data.joinedDirectly) {
+      showSuccess('Invitation accepted. You joined the group.');
+    } else {
+      showSuccess('Invitation accepted. Waiting for owner approval.');
+    }
+  }
+  
+  async function declineGroupInvite(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/invite/decline`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to decline invite');
+      return;
+    }
+  
+    setGroupInvites((prev) => prev.filter((item) => item.groupId !== groupId));
+    showSuccess('Invitation declined');
+  }
+  
+  async function approveGroupJoinRequest(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/requests/${userId}/approve`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to approve user');
+      return;
+    }
+  
+    showSuccess('User added to group');
+  }
+  
+  async function rejectGroupJoinRequest(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/requests/${userId}/reject`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to reject request');
+      return;
+    }
+  
+    showSuccess('Request rejected');
+  }
+  
+  async function setUserAdminRole(groupId: string, userId: string, makeAdmin: boolean) {
+    const res = await apiFetch(`/api/groups/${groupId}/admins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, makeAdmin })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to update role');
+      return;
+    }
+  
+    showSuccess(makeAdmin ? 'User promoted to group admin' : 'Admin role removed');
+  }
+
+  function deleteOwnGroupMessagesForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:messages:delete-own',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string; deletedCount?: number }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete your messages for everyone');
+          return;
+        }
+  
+        setDeleteGroupChatTargetId(null);
+  
+        showSuccess(
+          result.deletedCount
+            ? `${result.deletedCount} message${result.deletedCount > 1 ? 's were' : ' was'} deleted for everyone`
+            : 'You have no messages to delete in this group'
+        );
+      }
+    );
+  }
+
+  function clearGroupChatForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:delete',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to clear group chat for everyone');
+          return;
+        }
+  
+        setDeleteGroupChatTargetId(null);
+        showSuccess('Group chat cleared for everyone');
+      }
+    );
+  }
+  
+  async function removeGroupMember(groupId: string, userId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/members/${userId}`, {
+      method: 'DELETE'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to remove member');
+      return;
+    }
+  
+    showSuccess('Member removed');
+  }
+
+  function removeGroupConversationLocally(groupId: string) {
+    const key = groupConversationKey(groupId);
+  
+    setMessagesByConv((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }
+  
+  function moveAwayFromGroup(groupId: string) {
+    if (!me) return;
+  
+    const remainingGroups = groups.filter((group) => group.id !== groupId);
+    const fallbackDirect = pickPreferredDirectUserId({
+      meId: me.id,
+      users,
+      onlineUserIds,
+      idleUserIds,
+      historyMap: messagesByConv
+    });
+  
+    if (selectedChatKind === 'group' && selectedGroupId === groupId) {
+      if (remainingGroups.length) {
+        setSelectedChatKind('group');
+        setSelectedGroupId(remainingGroups[0].id);
+        setSelectedUserId('');
+        return;
+      }
+  
+      if (fallbackDirect) {
+        setSelectedChatKind('direct');
+        setSelectedUserId(fallbackDirect);
+        setSelectedGroupId('');
+        return;
+      }
+  
+      setSelectedChatKind('direct');
+      setSelectedUserId('');
+      setSelectedGroupId('');
+    }
+  }
+  
+  async function leaveGroup(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}/leave`, {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to leave group');
+      return;
+    }
+  
+    setGroupManageOpen(false);
+    setGroups((prev) => prev.filter((group) => group.id !== groupId));
+    removeGroupConversationLocally(groupId);
+    moveAwayFromGroup(groupId);
+  
+    showSuccess('You left the group');
+  }
+  
+  async function deleteGroup(groupId: string) {
+    const res = await apiFetch(`/api/groups/${groupId}`, {
+      method: 'DELETE'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to delete group');
+      return;
+    }
+  
+    setGroupManageOpen(false);
+    setGroups((prev) => prev.filter((group) => group.id !== groupId));
+    removeGroupConversationLocally(groupId);
+    moveAwayFromGroup(groupId);
+  
+    showSuccess('Group deleted');
+  }
+
+  async function confirmGroupDangerAction() {
+    if (!groupConfirmDialog) return;
+  
+    const { mode, groupId } = groupConfirmDialog;
+    setGroupConfirmDialog(null);
+  
+    if (mode === 'leave') {
+      await leaveGroup(groupId);
+      return;
+    }
+  
+    await deleteGroup(groupId);
+  }
+  
+  async function uploadGroupAvatar(groupId: string, file: File) {
+    const form = new FormData();
+    form.append('avatar', file);
+  
+    const res = await apiFetch(`/api/groups/${groupId}/avatar`, {
+      method: 'POST',
+      body: form
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to upload group avatar');
+      return;
+    }
+  
+    showSuccess('Group avatar updated');
+  }
+
   function getRenderableUser(userId: string): User {
     return (
       users.find((u) => u.id === userId) || {
@@ -1573,6 +2248,10 @@ export default function App() {
       })
       .sort((a, b) => b.message.createdAt - a.message.createdAt);
   }, [messagesByConv, users, me]);
+  
+  const invitationCount = useMemo(() => {
+    return groupInvites.filter((item) => item.status === 'invited').length;
+  }, [groupInvites]);
 
   function createPeer(remoteUserId: string, stream: MediaStream) {
     if (peerRef.current) return peerRef.current;
@@ -1812,6 +2491,111 @@ export default function App() {
     }
   }
 
+  function getUnreadIncomingGroupMessages(groupId: string, sourceMessages: Message[]) {
+    if (!me) return [];
+  
+    return sourceMessages.filter(
+      (m) =>
+        m.groupId === groupId &&
+        m.fromUserId !== me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !(m.groupReadByUserIds || []).includes(me.id)
+    );
+  }
+  
+  function applyGroupReadUpdate(groupId: string, userId: string, messageIds: string[]) {
+    if (!messageIds.length) return;
+  
+    setMessagesByConv((prev) => {
+      const key = groupConversationKey(groupId);
+      const current = prev[key] || [];
+  
+      return {
+        ...prev,
+        [key]: current.map((m) =>
+          messageIds.includes(m.id)
+            ? {
+                ...m,
+                groupReadByUserIds: Array.from(
+                  new Set([...(m.groupReadByUserIds || []), userId])
+                )
+              }
+            : m
+        )
+      };
+    });
+  }
+    
+  function markUnreadGroupMessagesAsRead(groupId: string, sourceMessages: Message[]) {
+    if (!socketRef.current || !me) return;
+    if (!isWindowActiveRef.current || !isMessagesNearBottom()) return;
+  
+    const unreadMessages = getUnreadIncomingGroupMessages(groupId, sourceMessages);
+    if (!unreadMessages.length) return;
+  
+    const messageIds = unreadMessages.map((m) => m.id);
+  
+    socketRef.current.emit(
+      'group:read',
+      { groupId, messageIds },
+      (result: { ok?: boolean; error?: string; messageIds?: string[] }) => {
+        if (!result?.ok) return;
+  
+        const confirmedIds =
+          result.messageIds && result.messageIds.length > 0
+            ? result.messageIds
+            : messageIds;
+  
+        applyGroupReadUpdate(groupId, me.id, confirmedIds);
+      }
+    );
+  }
+
+  async function flushCurrentGroupReadBeforeLogout() {
+    if (
+      !socketRef.current ||
+      !meRef.current ||
+      selectedChatKindRef.current !== 'group' ||
+      !selectedGroupIdRef.current ||
+      !isMessagesNearBottom()
+    ) {
+      return;
+    }
+  
+    const unreadMessages = getUnreadIncomingGroupMessages(
+      selectedGroupIdRef.current,
+      activeMessagesRef.current
+    );
+  
+    if (!unreadMessages.length) return;
+  
+    await new Promise<void>((resolve) => {
+      socketRef.current?.emit(
+        'group:read',
+        {
+          groupId: selectedGroupIdRef.current,
+          messageIds: unreadMessages.map((m) => m.id)
+        },
+        (result: { ok?: boolean; messageIds?: string[] }) => {
+          if (result?.ok) {
+            const confirmedIds =
+              result.messageIds && result.messageIds.length > 0
+                ? result.messageIds
+                : unreadMessages.map((m) => m.id);
+  
+            applyGroupReadUpdate(
+              selectedGroupIdRef.current,
+              meRef.current!.id,
+              confirmedIds
+            );
+          }
+  
+          resolve();
+        }
+      );
+    });
+  }
+
   function updateMessageScrollbar() {
     const el = messagesRef.current;
     if (!el) return;
@@ -1837,6 +2621,36 @@ export default function App() {
 
   function registerManualMessageScroll() {
     hasUserScrolledCurrentChatRef.current = true;
+  }
+
+  async function updateGroupTitle(groupId: string, title: string) {
+    const trimmed = title.trim();
+  
+    if (!trimmed) {
+      showError('Group name is required');
+      return;
+    }
+  
+    const res = await apiFetch(`/api/groups/${groupId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: trimmed })
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to update group name');
+      return;
+    }
+  
+    setGroups((prev) =>
+      prev.map((group) =>
+        group.id === groupId ? { ...group, ...data.group } : group
+      )
+    );
+  
+    showSuccess('Group name updated');
   }
 
   async function loadHistory(peerUserId: string, forceScroll = false) {
@@ -2230,6 +3044,19 @@ export default function App() {
     }
     setToast(null);
   }
+
+  function isGroupOwner(group: GroupChat | null, userId?: string | null) {
+    return !!group && !!userId && group.ownerUserId === userId;
+  }
+  
+  function isGroupAdmin(group: GroupChat | null, userId?: string | null) {
+    return (
+      !!group &&
+      !!userId &&
+      (group.ownerUserId === userId || group.adminUserIds.includes(userId))
+    );
+  }
+  
   
   function showToast(message: string, tone: ToastTone = 'info', duration = 3600) {
     if (toastTimerRef.current) {
@@ -2441,8 +3268,16 @@ export default function App() {
       return next;
     });
   
+    const currentMe = meRef.current;
+  
     const activeKey =
-      me && selectedUserIdRef.current ? conversationKey(me.id, selectedUserIdRef.current) : '';
+      currentMe
+        ? selectedChatKindRef.current === 'group' && selectedGroupIdRef.current
+          ? groupConversationKey(selectedGroupIdRef.current)
+          : selectedUserIdRef.current
+          ? conversationKey(currentMe.id, selectedUserIdRef.current)
+          : ''
+        : '';
   
     if (conversationKeyValue === activeKey) {
       setReplyingTo(null);
@@ -2487,6 +3322,38 @@ export default function App() {
   function closeLightbox() {
     setLightbox(null);
   }
+
+  function clearCurrentGroupConversationForMe() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:clear-for-me',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete group chat for you');
+        }
+      }
+    );
+  }
+  
+  function deleteCurrentGroupConversationForEveryone() {
+    if (!socketRef.current || !me || !deleteGroupChatTarget) return;
+  
+    socketRef.current.emit(
+      'group:conversation:delete',
+      {
+        groupId: deleteGroupChatTarget.id
+      },
+      (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          showError(result?.error || 'Failed to delete group chat for everyone');
+        }
+      }
+    );
+  }
   
   function showPrevLightbox() {
     setLightbox((prev) => {
@@ -2518,8 +3385,29 @@ export default function App() {
     });
   }
 
+  async function clearNotifications() {
+    const res = await apiFetch('/api/notifications/clear', {
+      method: 'POST'
+    });
+  
+    const data = await res.json().catch(() => ({}));
+  
+    if (!res.ok) {
+      showError(data.error || 'Failed to clear notifications');
+      return;
+    }
+  
+    setNotifications([]);
+    setUnreadNotificationCount(0);
+    showSuccess('Notifications cleared');
+  }
+
   function userName(userId: string) {
     return users.find((u) => u.id === userId)?.name || userId;
+  }
+
+  function isGroupMember(group: GroupChat | null, userId?: string | null) {
+    return !!group && !!userId && group.memberIds.includes(userId);
   }
 
   function isFileDrag(event: React.DragEvent | DragEvent) {
@@ -2774,9 +3662,33 @@ export default function App() {
 
   function handleMessagesScroll() {
     syncMessageViewportState();
-
+  
+    if (selectedChatKindRef.current === 'group') {
+      const groupId = selectedGroupIdRef.current;
+      if (!groupId) return;
+    
+      const nearBottom = isMessagesNearBottom();
+    
+      if (suppressAutoReadUntilBottomRef.current) {
+        if (!hasUserScrolledCurrentChatRef.current) return;
+        if (!nearBottom) return;
+    
+        suppressAutoReadUntilBottomRef.current = false;
+        autoScrollRef.current = true;
+        markUnreadGroupMessagesAsRead(groupId, activeMessagesRef.current);
+        return;
+      }
+    
+      if (nearBottom) {
+        autoScrollRef.current = true;
+        markUnreadGroupMessagesAsRead(groupId, activeMessagesRef.current);
+      }
+    
+      return;
+    }
+  
     if (selectedChatKindRef.current !== 'direct') return;
-
+  
     const peerUserId = selectedUserIdRef.current;
     if (!peerUserId) return;
   
@@ -2966,51 +3878,6 @@ export default function App() {
     }, 1200);
   }
 
-  const visibleUsers = useMemo(() => {
-    if (!me) return [] as User[];
-
-    const filtered = users.filter((u) => u.id !== me.id && u.name.toLowerCase().includes(search.toLowerCase()));
-
-    return filtered.sort((a, b) => {
-      const aMsgs = messagesByConv[conversationKey(me.id, a.id)] || [];
-      const bMsgs = messagesByConv[conversationKey(me.id, b.id)] || [];
-      const aLast = aMsgs.length ? aMsgs[aMsgs.length - 1].createdAt : 0;
-      const bLast = bMsgs.length ? bMsgs[bMsgs.length - 1].createdAt : 0;
-      return bLast - aLast || a.name.localeCompare(b.name);
-    });
-  }, [users, me, search, messagesByConv]);
-
-  const groupedContacts = useMemo(() => {
-    const onlineSet = new Set(onlineUserIds);
-    const idleSet = new Set(idleUserIds);
-  
-    const getLastTime = (userId: string) => {
-      const conv = messagesByConv[conversationKey(me!.id, userId)] || [];
-      return conv.length ? conv[conv.length - 1].createdAt : 0;
-    };
-  
-    const sortByRecent = (a: User, b: User) => {
-      const diff = getLastTime(b.id) - getLastTime(a.id);
-      return diff || a.name.localeCompare(b.name);
-    };
-  
-    const online: User[] = [];
-    const offline: User[] = [];
-  
-    for (const user of visibleUsers) {
-      if (onlineSet.has(user.id) || idleSet.has(user.id)) {
-        online.push(user);
-      } else {
-        offline.push(user);
-      }
-    }
-  
-    online.sort(sortByRecent);
-    offline.sort(sortByRecent);
-  
-    return { online, offline };
-  }, [visibleUsers, onlineUserIds, idleUserIds, messagesByConv, me]);
-
   const selectedUser =
   selectedChatKind === 'direct'
     ? users.find((u) => u.id === selectedUserId) || null
@@ -3037,10 +3904,36 @@ export default function App() {
   
     return result;
   }, [messagesByConv, users, me]);
+
+  const unreadCountByGroup = useMemo(() => {
+    if (!me) return {} as Record<string, number>;
+  
+    const result: Record<string, number> = {};
+  
+    for (const group of groups) {
+      const conv = messagesByConv[groupConversationKey(group.id)] || [];
+  
+      result[group.id] = conv.filter(
+        (m) =>
+          m.groupId === group.id &&
+          m.fromUserId !== me.id &&
+          isUnreadAffectingMessage(m, me.id) &&
+          !(m.groupReadByUserIds || []).includes(me.id)
+      ).length;
+    }
+  
+    return result;
+  }, [groups, messagesByConv, me]);
   
   const totalUnreadCount = useMemo(() => {
-    return Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
-  }, [unreadCountByUser]);
+    const directTotal = Object.values(unreadCountByUser).reduce((sum, count) => sum + count, 0);
+    const groupTotal = Object.values(unreadCountByGroup).reduce((sum, count) => sum + count, 0);
+    return directTotal + groupTotal;
+  }, [unreadCountByUser, unreadCountByGroup]);
+
+  const totalAppBadgeCount = useMemo(() => {
+    return totalUnreadCount;
+  }, [totalUnreadCount]);
   
   const activeMessages = useMemo(() => {
     if (!me) return [] as Message[];
@@ -3055,8 +3948,7 @@ export default function App() {
         : '';
   
     return key ? messagesByConv[key] || [] : [];
-  }, [messagesByConv, me, selectedChatKind, selectedUserId, selectedGroupId]);
-  
+  }, [messagesByConv, me, selectedChatKind, selectedUserId, selectedGroupId]);  
 
   const firstUnreadMessageId = useMemo(() => {
     if (!me || selectedChatKind !== 'direct' || !selectedUserId) return null;
@@ -3073,13 +3965,81 @@ export default function App() {
     return firstUnread?.id || null;
   }, [activeMessages, me, selectedChatKind, selectedUserId]);
 
+  const firstUnreadGroupMessageId = useMemo(() => {
+    if (!me || selectedChatKind !== 'group' || !selectedGroupId) return null;
+  
+    const firstUnread = activeMessages.find(
+      (m) =>
+        m.groupId === selectedGroupId &&
+        m.fromUserId !== me.id &&
+        isUnreadAffectingMessage(m, me.id) &&
+        !(m.groupReadByUserIds || []).includes(me.id)
+    );
+  
+    return firstUnread?.id || null;
+  }, [activeMessages, me, selectedChatKind, selectedGroupId]);
+
   const deleteMessageTarget = useMemo(() => {
     if (!deleteMessageTargetId) return null;
     return activeMessages.find((m) => m.id === deleteMessageTargetId) || null;
   }, [deleteMessageTargetId, activeMessages]);
+
   useEffect(() => {
     activeMessagesRef.current = activeMessages;
   }, [activeMessages]);  
+
+  useEffect(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return;
+  
+    requestAnimationFrame(() => {
+      if (firstUnreadGroupMessageId) {
+        suppressAutoReadUntilBottomRef.current = true;
+        hasUserScrolledCurrentChatRef.current = false;
+  
+        const targetEl = document.querySelector(
+          `[data-message-id="${firstUnreadGroupMessageId}"]`
+        ) as HTMLElement | null;
+  
+        if (targetEl) {
+          targetEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+          autoScrollRef.current = false;
+          syncMessageViewportState();
+  
+          requestAnimationFrame(() => {
+            const messagesEl = messagesRef.current;
+            if (!messagesEl) return;
+  
+            const hasScrollableArea =
+              messagesEl.scrollHeight > messagesEl.clientHeight + 1;
+  
+            if (!hasScrollableArea) {
+              suppressAutoReadUntilBottomRef.current = false;
+              hasUserScrolledCurrentChatRef.current = true;
+              autoScrollRef.current = true;
+  
+              markUnreadGroupMessagesAsRead(selectedGroupId, activeMessagesRef.current);
+              syncMessageViewportState();
+            }
+          });
+  
+          return;
+        }
+      }
+  
+      suppressAutoReadUntilBottomRef.current = false;
+      smoothScrollToBottom(true, false);
+    });
+  }, [selectedGroupId, selectedChatKind, firstUnreadGroupMessageId]);
+  
+  useEffect(() => {
+    if (selectedChatKind !== 'group' || !selectedGroupId) return;
+  
+    requestAnimationFrame(() => {
+      if (autoScrollRef.current && !suppressAutoReadUntilBottomRef.current) {
+        markUnreadGroupMessagesAsRead(selectedGroupId, activeMessagesRef.current);
+      }
+    });
+  }, [selectedChatKind, selectedGroupId, activeMessages.length]);
 
   const contextTargetMessage = useMemo(() => {
     if (!contextMenu) return null;
@@ -3088,28 +4048,46 @@ export default function App() {
 
   const selectedGroup = useMemo(() => {
     return groups.find((g) => g.id === selectedGroupId) || null;
-  }, [groups, selectedGroupId]);
+  }, [groups, selectedGroupId]);  
+
+  const canSeeGeneralGroupTab =
+  !!me && !!selectedGroup && isGroupAdmin(selectedGroup, me.id);
+
+  const selectedGroupMembers = useMemo(() => {
+    if (!selectedGroup) return [] as User[];
+    return selectedGroup.memberIds
+      .map((id) => users.find((u) => u.id === id))
+      .filter(Boolean) as User[];
+  }, [selectedGroup, users]);
   
+  const selectedGroupInviteCandidates = useMemo(() => {
+    if (!selectedGroup || !me) return [] as User[];
+  
+    return users.filter((user) => {
+      if (user.id === me.id) return false;
+      if (selectedGroup.memberIds.includes(user.id)) return false;
+      if (selectedGroup.invitedUserIds.includes(user.id)) return false;
+      if (selectedGroup.joinRequestUserIds.includes(user.id)) return false;
+      return true;
+    });
+  }, [selectedGroup, users, me]);
+  
+  const pendingGroupInvites = useMemo(() => {
+    return [...groupInvites].sort((a, b) => b.createdAt - a.createdAt);
+  }, [groupInvites]);
+  
+  const pendingGroupJoinApprovals = useMemo(() => {
+    if (!selectedGroup) return [] as User[];
+    return selectedGroup.joinRequestUserIds
+      .map((id) => users.find((u) => u.id === id))
+      .filter(Boolean) as User[];
+  }, [selectedGroup, users]);
   
   const activeGroupTypingUsers = useMemo(() => {
     if (selectedChatKind !== 'group' || !selectedGroupId) return [] as string[];
     return groupTypingByChat[groupConversationKey(selectedGroupId)] || [];
   }, [groupTypingByChat, selectedChatKind, selectedGroupId]);
   
-  const visibleGroups = useMemo(() => {
-    const q = search.trim().toLowerCase();
-  
-    return groups
-      .filter((group) => !q || group.title.toLowerCase().includes(q))
-      .sort((a, b) => {
-        const aMsgs = messagesByConv[groupConversationKey(a.id)] || [];
-        const bMsgs = messagesByConv[groupConversationKey(b.id)] || [];
-        const aLast = aMsgs.length ? aMsgs[aMsgs.length - 1].createdAt : 0;
-        const bLast = bMsgs.length ? bMsgs[bMsgs.length - 1].createdAt : 0;
-        return bLast - aLast || a.title.localeCompare(b.title);
-      });
-  }, [groups, search, messagesByConv]);
-
   const directHeaderTypingText = useMemo(() => {
     if (selectedChatKind !== 'direct' || !selectedUser) return '';
     return typingFrom[selectedUser.id] ? 'typing...' : '';
@@ -3134,6 +4112,15 @@ export default function App() {
   }, [selectedUserId, selectedGroupId, selectedChatKind, me, connectedServerUrl]);
 
   useEffect(() => {
+    if (!groupManageOpen || !selectedGroup || !me) return;
+  
+    setGroupManageTab(
+      isGroupAdmin(selectedGroup, me.id) ? 'general' : 'members'
+    );
+    setGroupEditTitle(selectedGroup.title || '');
+  }, [groupManageOpen, selectedGroup, me]);
+
+  useEffect(() => {
     if (!replyingTo) return;
     focusComposer();
   }, [replyingTo]);
@@ -3149,11 +4136,77 @@ export default function App() {
     }
   }, [selectedUserId, selectedGroupId, selectedChatKind]);
 
-  // useEffect(() => {
-  //   requestAnimationFrame(() => {
-  //     syncMessageViewportState();
-  //   });
-  // }, [activeMessages]);
+  const chatListItems = useMemo(() => {
+    if (!me) return [] as ContactListItem[];
+  
+    const q = search.trim().toLowerCase();
+  
+    const groupItems: ContactListItem[] = groups
+      .filter((group) => !q || group.title.toLowerCase().includes(q))
+      .map((group) => {
+        const conv = messagesByConv[groupConversationKey(group.id)] || [];
+        const last = conv[conv.length - 1];
+        const typingUsers = groupTypingByChat[groupConversationKey(group.id)] || [];
+  
+        return {
+          kind: 'group',
+          id: group.id,
+          title: group.title,
+          group,
+          last,
+          unreadCount: unreadCountByGroup[group.id] || 0,
+          typingText: groupTypingText(typingUsers, users),
+          sortAt: last?.createdAt || group.updatedAt || group.createdAt || 0
+        };
+      });
+  
+    const directItems: ContactListItem[] = users
+      .filter((user) => user.id !== me.id)
+      .filter(
+        (user) =>
+          !q ||
+          user.name.toLowerCase().includes(q) ||
+          user.userId.toLowerCase().includes(q)
+      )
+      .map((user) => {
+        const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
+        const last = conv[conv.length - 1];
+        const presence = getPresence(user.id);
+  
+        return {
+          kind: 'direct',
+          id: user.id,
+          title: user.name,
+          user,
+          last,
+          unreadCount: unreadCountByUser[user.id] || 0,
+          typingText: typingFrom[user.id] ? 'typing...' : '',
+          presence,
+          selectedTogether:
+            (presence === 'online' || presence === 'idle') &&
+            isSelectedTogether(user.id),
+          sortAt: last?.createdAt || user.createdAt || 0
+        };
+      });
+  
+    return [...groupItems, ...directItems].sort((a, b) => {
+      if (b.sortAt !== a.sortAt) return b.sortAt - a.sortAt;
+      return a.title.localeCompare(b.title);
+    });
+  }, [
+    me,
+    search,
+    groups,
+    users,
+    messagesByConv,
+    groupTypingByChat,
+    unreadCountByGroup,
+    unreadCountByUser,
+    typingFrom,
+    onlineUserIds,
+    idleUserIds,
+    activeChatTargets
+  ]);
 
   useEffect(() => {
     if (selectedChatKind !== 'direct' || !selectedUserId) return;
@@ -3200,7 +4253,7 @@ export default function App() {
   
   useEffect(() => {
     if (selectedChatKind === 'group') {
-      if (autoScrollRef.current) {
+      if (autoScrollRef.current || !firstUnreadGroupMessageId) {
         smoothScrollToBottom(false, false);
       }
       return;
@@ -3211,16 +4264,23 @@ export default function App() {
     if (autoScrollRef.current || !firstUnreadMessageId) {
       smoothScrollToBottom(false, false);
     }
-  }, [activeMessages.length, selectedUserId, selectedGroupId, selectedChatKind, firstUnreadMessageId]);
+  }, [
+    activeMessages.length,
+    selectedUserId,
+    selectedGroupId,
+    selectedChatKind,
+    firstUnreadMessageId,
+    firstUnreadGroupMessageId
+  ]);
 
   useEffect(() => {
     const baseTitle = 'LAN Chat';
   
     document.title =
-      totalUnreadCount > 0 ? `(${totalUnreadCount}) ${baseTitle}` : baseTitle;
+      totalAppBadgeCount > 0 ? `(${totalAppBadgeCount}) ${baseTitle}` : baseTitle;
   
-    void desktopApi.setBadgeCount?.(totalUnreadCount);
-  }, [totalUnreadCount]);
+    void desktopApi.setBadgeCount?.(totalAppBadgeCount);
+  }, [totalAppBadgeCount]);
 
   useEffect(() => {
     const onResize = () => updateMessageScrollbar();
@@ -3335,54 +4395,74 @@ export default function App() {
         <div className="sidebar-top">
           <div className="profile-card">
             <UserAvatar user={me} serverUrl={connectedServerUrl} />
-            <div>
+            <div className="profile-meta">
               <div className="name">{me.userId}</div>
               <div className="sub">{me.name}</div>
             </div>
           </div>
 
-          <div className="header-actions">
-            <button className="icon-btn" onClick={() => setProfileOpen(true)} title="Profile">
-              ⚙
-            </button>
-
-            <button
-              className="icon-btn"
-              onClick={() => setGroupCreateOpen(true)}
-              title="Create group"
-            >
-              ＋
-            </button>
-
-            {me.role === 'admin' ? (
-              <button className="icon-btn" onClick={() => {
-                loadAdminUsers()
-                setAdminOpen(true)
-                }} title="Admin users">
-                🛡
+          <div className="sidebar-top-actions">
+            <div className="top-actions-menu-wrap" ref={sidebarMenuRef}>
+              <button
+                className={`icon-btn ${sidebarMenuOpen ? 'active' : ''}`}
+                onClick={() => setSidebarMenuOpen((prev) => !prev)}
+                title="Options"
+                aria-label="Options"
+              >
+                ⋮
               </button>
-            ) : null}
+
+              {sidebarMenuOpen ? (
+                <div
+                  className="top-actions-popup"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <button
+                    className="top-actions-popup-item"
+                    onClick={() => {
+                      setSidebarMenuOpen(false);
+                      setProfileOpen(true);
+                    }}
+                  >
+                    <span className="top-actions-popup-icon">⚙</span>
+                    <span>Profile</span>
+                  </button>
+
+                  <button
+                    className="top-actions-popup-item"
+                    onClick={() => {
+                      setSidebarMenuOpen(false);
+                      setGroupCreateOpen(true);
+                    }}
+                  >
+                    <span className="top-actions-popup-icon">＋</span>
+                    <span>Create group</span>
+                  </button>
+
+                  {me.role === 'admin' ? (
+                    <button
+                      className="top-actions-popup-item"
+                      onClick={() => {
+                        setSidebarMenuOpen(false);
+                        loadAdminUsers();
+                        setAdminOpen(true);
+                      }}
+                    >
+                      <span className="top-actions-popup-icon">🛡</span>
+                      <span>Admin users</span>
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
 
             <button
               className="icon-btn"
-              onClick={async () => {
-                try {
-                  await apiFetch('/api/logout', { method: 'POST' });
-                } catch {}
-                cleanupCall(true);
-                socketRef.current?.disconnect();
-                localStorage.removeItem('lan_chat_auth_token');
-                meRef.current = null;
-                setActiveChatTargets({});
-                setHasExplicitContactSelection(false);
-                setMe(null);
-                setAuthToken('');
-                setIsSocketAuthed(false);
-                setSelectedUserId('');
-                setSelectedGroupId('');
-                setSelectedChatKind('direct');
+              onClick={() => {
+                void handleLogout();
               }}
               title="Logout"
+              aria-label="Logout"
             >
               ⎋
             </button>
@@ -3398,30 +4478,108 @@ export default function App() {
           <button
             className={`tab ${activeSidebarTab === 'chats' ? 'active' : ''}`}
             onClick={() => setActiveSidebarTab('chats')}
+            title="Chats"
+            aria-label="Chats"
           >
-            Chats
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M7 18L3.5 20.5L4.5 16.5C3.6 15.3 3 13.8 3 12C3 7.6 7 4 12 4C17 4 21 7.6 21 12C21 16.4 17 20 12 20C10.2 20 8.5 19.3 7 18Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
           </button>
 
           <button
             className={`tab ${activeSidebarTab === 'calls' ? 'active' : ''}`}
             onClick={() => setActiveSidebarTab('calls')}
+            title="Calls"
+            aria-label="Calls"
           >
-            Calls
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M6.6 4.8L9.3 4C9.7 3.9 10.2 4.1 10.4 4.5L11.7 7.6C11.9 8 11.8 8.5 11.4 8.8L9.9 10C10.8 11.9 12.1 13.2 14 14.1L15.2 12.6C15.5 12.2 16 12.1 16.4 12.3L19.5 13.6C19.9 13.8 20.1 14.3 20 14.7L19.2 17.4C19.1 17.8 18.7 18 18.3 18C10.9 18 6 13.1 6 5.7C6 5.3 6.2 4.9 6.6 4.8Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </span>
+          </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'invitations' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('invitations')}
+            title="Invitations"
+            aria-label="Invitations"
+          >
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M4 7.5C4 6.7 4.7 6 5.5 6H18.5C19.3 6 20 6.7 20 7.5V16.5C20 17.3 19.3 18 18.5 18H5.5C4.7 18 4 17.3 4 16.5V7.5Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M5 7L12 12L19 7"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+
+              {invitationCount > 0 ? (
+                <span className="tab-badge">
+                  {invitationCount > 99 ? '99+' : invitationCount}
+                </span>
+              ) : null}
+            </span>
+          </button>
+
+          <button
+            className={`tab ${activeSidebarTab === 'notifications' ? 'active' : ''}`}
+            onClick={() => setActiveSidebarTab('notifications')}
+            title="Notifications"
+            aria-label="Notifications"
+          >
+            <span className="tab-icon">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M12 20C13.1 20 14 19.1 14 18H10C10 19.1 10.9 20 12 20Z"
+                  fill="currentColor"
+                />
+                <path
+                  d="M6 17H18L16.8 15.4V11C16.8 8.2 14.9 6 12.4 5.4V4.8C12.4 4.4 12.1 4 11.7 4C11.3 4 11 4.4 11 4.8V5.4C8.5 6 6.6 8.2 6.6 11V15.4L6 17Z"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+
+              {unreadNotificationCount > 0 ? (
+                <span className="tab-badge">
+                  {unreadNotificationCount > 99 ? '99+' : unreadNotificationCount}
+                </span>
+              ) : null}
+            </span>
           </button>
         </div>
 
         <div className="contact-list">
           {activeSidebarTab === 'chats' ? (
-            <>
-              {visibleGroups.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title">Groups</div>
-
-                  {visibleGroups.map((group) => {
-                    const conv = messagesByConv[groupConversationKey(group.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const groupTypingUsers = groupTypingByChat[groupConversationKey(group.id)] || [];
-                    const groupPreviewTypingText = groupTypingText(groupTypingUsers, users);
+            chatListItems.length ? (
+              <div className="contact-group">
+                {chatListItems.map((item) => {
+                  if (item.kind === 'group') {
+                    const { group, last, unreadCount, typingText } = item;
 
                     return (
                       <button
@@ -3449,12 +4607,18 @@ export default function App() {
 
                             <div className="contact-head-right">
                               <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                              {unreadCount > 0 ? (
+                                <span className="contact-badge below-time">
+                                  {unreadCount > 99 ? '99+' : unreadCount}
+                                </span>
+                              ) : null}
                             </div>
                           </div>
 
                           <div className="contact-preview">
-                            {groupPreviewTypingText
-                              ? groupPreviewTypingText
+                            {typingText
+                              ? typingText
                               : last
                               ? previewText(last, me.id, users)
                               : `${group.memberIds.length} members`}
@@ -3462,117 +4626,56 @@ export default function App() {
                         </div>
                       </button>
                     );
-                  })}
-                </div>
-              ) : null}
-              {groupedContacts.online.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title">Online</div>
+                  }
 
-                  {groupedContacts.online.map((user) => {
-                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const presence = getPresence(user.id);
-                    const unreadCount = unreadCountByUser[user.id] || 0;
-                    const selectedTogether =
-                      (presence === 'online' || presence === 'idle') &&
-                      isSelectedTogether(user.id);
+                  const { user, last, unreadCount, typingText, presence, selectedTogether } = item;
 
-                    return (
-                      <button
-                        key={user.id}
-                        className={`contact-card ${
-                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
-                        }`}
-                        onClick={() => handleSelectContact(user.id)}
-                      >
-                        <div className="contact-avatar-wrap">
-                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                  return (
+                    <button
+                      key={user.id}
+                      className={`contact-card ${presence === 'offline' ? 'offline' : ''} ${
+                        selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
+                      }`}
+                      onClick={() => handleSelectContact(user.id)}
+                    >
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        {presence !== 'offline' ? (
                           <span
-                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${selectedTogether ? 'selected-together' : ''}`}
+                            className={`online-dot ${presence === 'idle' ? 'idle' : ''} ${
+                              selectedTogether ? 'selected-together' : ''
+                            }`}
                           />
-                        </div>
+                        ) : null}
+                      </div>
 
-                        <div className="contact-text">
-                          <div className="contact-head">
-                            <span className="contact-name">{user.name}</span>
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{user.name}</span>
 
-                            <div className="contact-head-right">
-                              <span className="contact-time">
-                                {timeLabel(last?.createdAt)}
+                          <div className="contact-head-right">
+                            <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+
+                            {unreadCount > 0 ? (
+                              <span className="contact-badge below-time">
+                                {unreadCount > 99 ? '99+' : unreadCount}
                               </span>
-
-                              {unreadCount > 0 ? (
-                                <span className="contact-badge below-time">
-                                  {unreadCount > 99 ? '99+' : unreadCount}
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="contact-preview">
-                            {typingFrom[user.id]
-                              ? 'typing...'
-                              : previewText(last, me.id, users)}
+                            ) : null}
                           </div>
                         </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
 
-              {groupedContacts.offline.length ? (
-                <div className="contact-group">
-                  <div className="contact-group-title offline">Offline</div>
-
-                  {groupedContacts.offline.map((user) => {
-                    const conv = messagesByConv[conversationKey(me.id, user.id)] || [];
-                    const last = conv[conv.length - 1];
-                    const unreadCount = unreadCountByUser[user.id] || 0;
-
-                    return (
-                      <button
-                        key={user.id}
-                        className={`contact-card offline ${
-                          selectedChatKind === 'direct' && selectedUserId === user.id ? 'selected' : ''
-                        }`}
-                        onClick={() => handleSelectContact(user.id)}
-                      >
-                        <div className="contact-avatar-wrap">
-                          <UserAvatar user={user} serverUrl={connectedServerUrl} />
+                        <div className="contact-preview">
+                          {typingText ? typingText : previewText(last, me.id, users)}
                         </div>
-
-                        <div className="contact-text">
-                          <div className="contact-head">
-                            <span className="contact-name">{user.name}</span>
-
-                            <div className="contact-head-right">
-                              <span className="contact-time">
-                                {timeLabel(last?.createdAt)}
-                              </span>
-
-                              {unreadCount > 0 ? (
-                                <span className="contact-badge below-time">
-                                  {unreadCount > 99 ? '99+' : unreadCount}
-                                </span>
-                              ) : null}
-                            </div>
-                          </div>
-
-                          <div className="contact-preview">
-                            {typingFrom[user.id]
-                              ? 'typing...'
-                              : previewText(last, me.id, users)}
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </>
-          ) : (
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="admin-empty">No chats found.</div>
+            )
+          ) : activeSidebarTab === 'calls' ? (
             <div className="contact-group">
               <div className="contact-group-title">All Call History</div>
 
@@ -3624,6 +4727,155 @@ export default function App() {
                 <div className="admin-empty">No call history yet.</div>
               )}
             </div>
+          ) : activeSidebarTab === 'invitations' ? (
+            <div className="contact-group">
+              <div className="contact-group-title">Group invitations</div>
+          
+              {pendingGroupInvites.length ? (
+  pendingGroupInvites.map((invite) => {
+    const isRequested = invite.status === 'requested';
+
+    return (
+      <div
+        key={`${invite.groupId}_${invite.status}`}
+        className="admin-user-row invitation-row"
+      >
+        <div className="admin-user-main invitation-main">
+          <UserAvatar
+            user={{
+              id: invite.groupId,
+              userId: invite.title,
+              name: invite.title,
+              avatarUrl: invite.avatarUrl || null
+            }}
+            serverUrl={connectedServerUrl}
+            size="small"
+          />
+          <div className="invitation-text">
+            <div className="contact-name">{invite.title}</div>
+            <div className="contact-preview invitation-preview">
+              {isRequested
+                ? 'Waiting for owner approval'
+                : 'You have been invited to this group'}
+            </div>
+          </div>
+        </div>
+
+        <div className="invitation-actions">
+          {isRequested ? (
+            <button
+              className="icon-btn wide"
+              onClick={() => {
+                void declineGroupInvite(invite.groupId);
+              }}
+            >
+              Cancel
+            </button>
+          ) : (
+            <>
+              <button
+                className="icon-btn wide"
+                onClick={() => {
+                  void declineGroupInvite(invite.groupId);
+                }}
+              >
+                Decline
+              </button>
+
+              <button
+                className="primary invitation-accept-btn"
+                onClick={() => {
+                  void acceptGroupInvite(invite.groupId);
+                }}
+              >
+                Accept
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  })
+              ) : (
+                <div className="admin-empty">No invitations yet.</div>
+              )}
+            </div>
+          ) : (
+            <div className="contact-group">
+              <div
+                className="contact-group-title"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12
+                }}
+              >
+                <span>Notifications</span>
+          
+                <button
+                  type="button"
+                  className="icon-btn small"
+                  onClick={() => {
+                    void clearNotifications();
+                  }}
+                  disabled={!notifications.length}
+                  title="Clear notifications"
+                >
+                  Clear
+                </button>
+              </div>
+          
+              {notifications.length ? (
+                notifications.map((item) => {
+                  const matchedUser = item.userId
+                    ? users.find((u) => u.id === item.userId)
+                    : null;
+
+                  const matchedGroup = item.groupId
+                    ? groups.find((g) => g.id === item.groupId)
+                    : null;
+
+                  const avatarUser =
+                    item.kind === 'group'
+                      ? {
+                          id: item.groupId || item.id,
+                          userId: matchedGroup?.title || item.title,
+                          name: matchedGroup?.title || item.title,
+                          avatarUrl: matchedGroup?.avatarUrl || item.avatarUrl || null
+                        }
+                      : {
+                          id: item.userId || item.id,
+                          userId: matchedUser?.userId || item.userName,
+                          name: matchedUser?.name || item.userName,
+                          avatarUrl: matchedUser?.avatarUrl || item.avatarUrl || null
+                        };
+
+                  const heading = item.kind === 'group' ? item.title : item.userName;
+
+                  return (
+                    <div key={item.id} className="contact-card">
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar user={avatarUser} serverUrl={connectedServerUrl} />
+                      </div>
+
+                      <div className="contact-text">
+                        <div className="contact-head">
+                          <span className="contact-name">{heading}</span>
+                          <div className="contact-head-right">
+                            <span className="contact-time">{timeLabel(item.createdAt)}</span>
+                          </div>
+                        </div>
+
+                        <div className="contact-preview">{notificationText(item)}</div>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="admin-empty">No notifications yet.</div>
+              )}
+            </div>
           )}
         </div>
       </aside>
@@ -3665,16 +4917,26 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-
-                  <div className="header-actions">
-                    <button
-                      className="icon-btn"
-                      onClick={() => setGroupCreateOpen(true)}
-                      title="Create group"
-                    >
-                      ＋
-                    </button>
-                  </div>
+              
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="header-actions">
+                      <button
+                        className="icon-btn"
+                        onClick={() => setDeleteGroupChatTargetId(selectedGroup.id)}
+                        title="Delete chat"
+                      >
+                        🗑
+                      </button>
+                    
+                      <button
+                        className="icon-btn"
+                        onClick={() => setGroupManageOpen(true)}
+                        title="Manage group"
+                      >
+                        ⚙
+                      </button>
+                    </div>
+                  ) : null}
                 </>
               ) : selectedUser ? (
                 <>
@@ -3749,14 +5011,6 @@ export default function App() {
                     >
                       🗑
                     </button>
-
-                    <button
-                      className="icon-btn"
-                      onClick={() => setGroupCreateOpen(true)}
-                      title="Create group"
-                    >
-                      ＋
-                    </button>
                   </div>
                 </>
               ) : null}
@@ -3775,7 +5029,10 @@ export default function App() {
                   const mine = m.fromUserId === me.id;
                   const prev = activeMessages[idx - 1];
                   const next = activeMessages[idx + 1];
-                  const showUnreadDivider = !mine && firstUnreadMessageId === m.id;
+                  const showUnreadDivider =
+                    !mine &&
+                    ((selectedChatKind === 'direct' && firstUnreadMessageId === m.id) ||
+                      (selectedChatKind === 'group' && firstUnreadGroupMessageId === m.id));
 
                   const showDivider =
                     !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
@@ -3946,6 +5203,14 @@ export default function App() {
                   
                     requestAnimationFrame(() => {
                       requestAnimationFrame(() => {
+                        if (selectedChatKindRef.current === 'group' && selectedGroupIdRef.current) {
+                          markUnreadGroupMessagesAsRead(
+                            selectedGroupIdRef.current,
+                            activeMessagesRef.current
+                          );
+                          return;
+                        }
+                  
                         if (selectedUserIdRef.current) {
                           markUnreadMessagesAsRead(selectedUserIdRef.current, activeMessagesRef.current);
                         }
@@ -4065,74 +5330,6 @@ export default function App() {
           </div>
         ) : null}
       </main>
-
-      {deleteChatTarget ? (
-        <div className="call-overlay">
-          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
-            <div className="call-top">
-              <div>
-                <div className="call-name">Delete chat</div>
-                <div className="call-sub">Choose how to delete chat with {deleteChatTarget.name}</div>
-              </div>
-            </div>
-
-            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
-              Delete for me hides the current chat only on your app.
-              <br />
-              Delete for everyone removes the chat history for both users.
-            </div>
-
-            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
-              <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
-                Cancel
-              </button>
-              <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
-                Delete for me
-              </button>
-              <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
-                Delete for everyone
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {deleteMessageTarget ? (
-        <div className="call-overlay">
-          <div className="call-modal" style={{ width: 'min(480px, calc(100% - 32px))' }}>
-            <div className="call-top">
-              <div>
-                <div className="call-name">Delete message</div>
-                <div className="call-sub">
-                  Choose how to delete this message
-                </div>
-              </div>
-            </div>
-
-            <div style={{ color: 'var(--muted)', marginBottom: 18, lineHeight: 1.5 }}>
-              Delete for me hides this message only on your app.
-              <br />
-              {deleteMessageTarget.fromUserId === me.id
-                ? 'Delete for everyone replaces the message for both users.'
-                : 'You can delete this message for yourself.'}
-            </div>
-
-            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
-              <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
-                Cancel
-              </button>
-              <button className="icon-btn wide" onClick={clearMessageForMe}>
-                Delete for me
-              </button>
-              {deleteMessageTarget.fromUserId === me.id ? (
-                <button className="danger wide" onClick={deleteMessageForEveryone}>
-                  Delete for everyone
-                </button>
-              ) : null}
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {incomingFromUserId ? (
         <div className="incoming-box tg-incoming-call">
@@ -4471,6 +5668,7 @@ export default function App() {
                         groups?: GroupChat[];
                         onlineUserIds: string[];
                         idleUserIds: string[];
+                        groupInvites: GroupInvite[];
                         activeChatTargets?: Record<string, string | null>;
                       }) => {
                         setUsers(payload.users || []);
@@ -4478,6 +5676,7 @@ export default function App() {
                         setOnlineUserIds(payload.onlineUserIds || []);
                         setIdleUserIds(payload.idleUserIds || []);
                         setActiveChatTargets(payload.activeChatTargets || {});
+                        setGroupInvites(payload.groupInvites || []);
 
                         await loadAllHistories(payload.users || [], undefined, payload.groups || []);
                       }
@@ -4713,6 +5912,405 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      {groupManageOpen && selectedGroup ? (
+        <div className="call-overlay">
+          <div className="call-modal admin-modal">
+            <div className="call-top">
+              <div>
+                <div className="call-name">Manage Group</div>
+                <div className="call-sub">{selectedGroup.title}</div>
+              </div>
+            </div>
+
+            <div className="settings-body">
+              <div className="group-manage-tabs">
+                {canSeeGeneralGroupTab ? (
+                  <button
+                    className={`group-manage-tab ${groupManageTab === 'general' ? 'active' : ''}`}
+                    onClick={() => setGroupManageTab('general')}
+                  >
+                    General
+                  </button>
+                ) : null}
+
+                <button
+                  className={`group-manage-tab ${groupManageTab === 'members' ? 'active' : ''}`}
+                  onClick={() => setGroupManageTab('members')}
+                >
+                  Members
+                </button>
+              </div>
+
+              {groupManageTab === 'general' && canSeeGeneralGroupTab ? (
+                <>
+                  <div className="group-manage-section">
+                    <div className="contact-group-title">Group info</div>
+
+                    <div className="settings-avatar-row">
+                      <UserAvatar
+                        user={{
+                          id: selectedGroup.id,
+                          userId: selectedGroup.title,
+                          name: selectedGroup.title,
+                          avatarUrl: selectedGroup.avatarUrl || null
+                        }}
+                        serverUrl={connectedServerUrl}
+                        size="large"
+                      />
+
+                      {isGroupAdmin(selectedGroup, me.id) ? (
+                        <label className="primary upload-btn">
+                          Upload group avatar
+                          <input
+                            type="file"
+                            accept="image/*"
+                            hidden
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              void uploadGroupAvatar(selectedGroup.id, file);
+                            }}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+
+                    <label className="field">
+                      <span>Group name</span>
+                      <input
+                        value={groupEditTitle}
+                        onChange={(e) => setGroupEditTitle(e.target.value)}
+                        disabled={!isGroupAdmin(selectedGroup, me.id)}
+                        placeholder="Group name"
+                      />
+                    </label>
+
+                    {isGroupAdmin(selectedGroup, me.id) ? (
+                      <div className="settings-actions">
+                        <button
+                          className="primary"
+                          onClick={() => {
+                            void updateGroupTitle(selectedGroup.id, groupEditTitle);
+                          }}
+                        >
+                          Save group name
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="contact-preview">
+                        Only group admins can change the group name or avatar.
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  {isGroupOwner(selectedGroup, me.id) ? (
+                    <div className="group-manage-section">
+                      <div className="contact-group-title">Pending join approvals</div>
+
+                      <div className="admin-user-list">
+                        {pendingGroupJoinApprovals.length ? (
+                          pendingGroupJoinApprovals.map((user) => (
+                            <div key={user.id} className="admin-user-row">
+                              <div className="admin-user-main">
+                                <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                                <div>
+                                  <div className="contact-name">{user.name}</div>
+                                  <div className="contact-preview">@{user.userId}</div>
+                                </div>
+                              </div>
+
+                              <div className="admin-user-perms">
+                                <button
+                                  className="icon-btn wide"
+                                  onClick={() => {
+                                    void rejectGroupJoinRequest(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Reject
+                                </button>
+
+                                <button
+                                  className="primary"
+                                  onClick={() => {
+                                    void approveGroupJoinRequest(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Approve
+                                </button>
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="admin-empty">No pending requests.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="group-manage-section">
+                      <div className="contact-group-title">Invite users</div>
+
+                      <div className="admin-user-list">
+                        {selectedGroupInviteCandidates.length ? (
+                          selectedGroupInviteCandidates.map((user) => (
+                            <div key={user.id} className="admin-user-row">
+                              <div className="admin-user-main">
+                                <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                                <div>
+                                  <div className="contact-name">{user.name}</div>
+                                  <div className="contact-preview">@{user.userId}</div>
+                                </div>
+                              </div>
+
+                              <button
+                                className="primary"
+                                onClick={() => {
+                                  void inviteUserToGroup(selectedGroup.id, user.id);
+                                }}
+                              >
+                                Invite
+                              </button>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="admin-empty">No available users to invite.</div>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isGroupMember(selectedGroup, me.id) ? (
+                    <div className="group-manage-section group-manage-danger-section">
+                      <div className="contact-group-title">
+                        {isGroupOwner(selectedGroup, me.id) ? 'Delete group' : 'Leave group'}
+                      </div>
+
+                      <div className="contact-preview group-manage-danger-copy">
+                        {isGroupOwner(selectedGroup, me.id)
+                          ? 'As the owner, you cannot leave this group. Deleting it will remove the group for all members.'
+                          : 'Leave this group and stop receiving its messages. The group will remain available for the other members.'}
+                      </div>
+
+                      <div className="group-manage-danger-actions">
+                        {isGroupOwner(selectedGroup, me.id) ? (
+                          <button
+                            className="danger wide"
+                            onClick={() => {
+                              setGroupConfirmDialog({
+                                mode: 'delete',
+                                groupId: selectedGroup.id,
+                                title: selectedGroup.title
+                              });
+                            }}
+                          >
+                            Delete group
+                          </button>
+                        ) : (
+                          <button
+                            className="danger wide"
+                            onClick={() => {
+                              setGroupConfirmDialog({
+                                mode: 'leave',
+                                groupId: selectedGroup.id,
+                                title: selectedGroup.title
+                              });
+                            }}
+                          >
+                            Leave group
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="group-manage-section">
+                    <div className="contact-group-title">Members</div>
+
+                    <div className="admin-user-list">
+                      {selectedGroupMembers.map((user) => {
+                        const isOwner = selectedGroup.ownerUserId === user.id;
+                        const isAdminUser = selectedGroup.adminUserIds.includes(user.id);
+
+                        return (
+                          <div key={user.id} className="admin-user-row">
+                            <div className="admin-user-main">
+                              <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                              <div>
+                                <div className="contact-name">{user.name}</div>
+                                <div className="contact-preview">
+                                  @{user.userId}
+                                  {isOwner
+                                    ? ' · Owner'
+                                    : isAdminUser
+                                    ? ' · Admin'
+                                    : ' · Member'}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="admin-user-perms">
+                              {isGroupOwner(selectedGroup, me.id) && !isOwner ? (
+                                <button
+                                  className="icon-btn wide"
+                                  onClick={() => {
+                                    void setUserAdminRole(
+                                      selectedGroup.id,
+                                      user.id,
+                                      !isAdminUser
+                                    );
+                                  }}
+                                >
+                                  {isAdminUser ? 'Remove admin' : 'Make admin'}
+                                </button>
+                              ) : null}
+
+                              {isGroupAdmin(selectedGroup, me.id) && !isOwner && user.id !== me.id ? (
+                                <button
+                                  className="danger wide"
+                                  onClick={() => {
+                                    void removeGroupMember(selectedGroup.id, user.id);
+                                  }}
+                                >
+                                  Remove
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setGroupManageOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      
+      <ConfirmModal
+  open={!!deleteChatTarget}
+  title="Delete chat"
+  subtitle={deleteChatTarget ? `Choose how to delete chat with ${deleteChatTarget.name}` : ''}
+  onClose={() => setDeleteChatTargetUserId(null)}
+  actions={
+    <>
+      <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
+        Cancel
+      </button>
+      <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
+        Delete for me
+      </button>
+      <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
+        Delete for everyone
+      </button>
+    </>
+  }
+>
+  <>
+    Delete for me hides the current chat only on your app.
+    <br />
+    Delete for everyone removes the chat history for both users.
+  </>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!deleteMessageTarget}
+        title="Delete message"
+        subtitle="Choose how to delete this message"
+        onClose={() => setDeleteMessageTargetId(null)}
+        actions={
+          <>
+            <button className="icon-btn wide" onClick={() => setDeleteMessageTargetId(null)}>
+              Cancel
+            </button>
+            <button className="icon-btn wide" onClick={clearMessageForMe}>
+              Delete for me
+            </button>
+            {deleteMessageTarget?.fromUserId === me.id ? (
+              <button className="danger wide" onClick={deleteMessageForEveryone}>
+                Delete for everyone
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <>
+          Delete for me hides this message only on your app.
+          <br />
+          {deleteMessageTarget?.fromUserId === me.id
+            ? 'Delete for everyone replaces the message for both users.'
+            : 'You can delete this message for yourself.'}
+        </>
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!groupConfirmDialog}
+        title={groupConfirmDialog?.mode === 'delete' ? 'Delete group' : 'Leave group'}
+        subtitle={groupConfirmDialog?.title || ''}
+        onClose={() => setGroupConfirmDialog(null)}
+        confirmText={groupConfirmDialog?.mode === 'delete' ? 'Delete group' : 'Leave group'}
+        confirmClassName="danger wide"
+        onConfirm={() => {
+          void confirmGroupDangerAction();
+        }}
+      >
+        {groupConfirmDialog?.mode === 'delete'
+          ? 'This will permanently remove the group and its messages for all members.'
+          : 'You will leave this group and stop receiving its messages. Other members will stay in the group.'}
+      </ConfirmModal>
+
+      <ConfirmModal
+        open={!!deleteGroupChatTarget}
+        title="Delete group chat"
+        subtitle={
+          deleteGroupChatTarget
+            ? `Choose how to delete chat in ${deleteGroupChatTarget.title}`
+            : ''
+        }
+        onClose={() => setDeleteGroupChatTargetId(null)}
+        actions={
+          <>
+            <button className="icon-btn wide" onClick={() => setDeleteGroupChatTargetId(null)}>
+              Cancel
+            </button>
+
+            <button className="icon-btn wide" onClick={clearCurrentGroupConversationForMe}>
+              Delete for me
+            </button>
+
+            <button className="icon-btn wide" onClick={deleteOwnGroupMessagesForEveryone}>
+              Delete my messages for everyone
+            </button>
+
+            {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id) ? (
+              <button className="danger wide" onClick={clearGroupChatForEveryone}>
+                Clear chat
+              </button>
+            ) : null}
+          </>
+        }
+      >
+        <>
+          Delete for me hides this group chat only on your app.
+          <br />
+          Delete my messages for everyone removes all messages you sent in this group for all members.
+          <br />
+          {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id)
+            ? 'Clear chat removes all group messages for every member.'
+            : 'Only the group owner can clear the whole group chat for everyone.'}
+        </>
+      </ConfirmModal>
 
       {toast ? (
         <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">

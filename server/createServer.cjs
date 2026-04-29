@@ -56,6 +56,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       return false;
     }
   }
+  
 
   function createId(prefix) {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -126,19 +127,49 @@ function createLanServer({ port = 4000, userDataPath }) {
     const memberIds = Array.isArray(raw?.memberIds)
       ? [...new Set(raw.memberIds.map((v) => String(v || '')).filter(Boolean))]
       : [];
-
+  
     const ownerUserId = raw?.ownerUserId ? String(raw.ownerUserId) : null;
-
+  
     if (ownerUserId && !memberIds.includes(ownerUserId)) {
       memberIds.unshift(ownerUserId);
     }
-
+  
+    const adminUserIds = Array.isArray(raw?.adminUserIds)
+      ? [...new Set(raw.adminUserIds.map((v) => String(v || '')).filter(Boolean))]
+      : [];
+  
+    if (ownerUserId && !adminUserIds.includes(ownerUserId)) {
+      adminUserIds.unshift(ownerUserId);
+    }
+  
+    const invitedUserIds = Array.isArray(raw?.invitedUserIds)
+      ? [...new Set(raw.invitedUserIds.map((v) => String(v || '')).filter(Boolean))]
+      : [];
+  
+    const joinRequestUserIds = Array.isArray(raw?.joinRequestUserIds)
+      ? [...new Set(raw.joinRequestUserIds.map((v) => String(v || '')).filter(Boolean))]
+      : [];
+  
+    const pendingInvites = Array.isArray(raw?.pendingInvites)
+      ? raw.pendingInvites
+          .map((item) => ({
+            userId: String(item?.userId || ''),
+            invitedByUserId: String(item?.invitedByUserId || ''),
+            createdAt: Number(item?.createdAt) || Date.now()
+          }))
+          .filter((item) => item.userId && !memberIds.includes(item.userId))
+      : [];
+  
     return {
       id: String(raw?.id || createId('g')),
       title: safeDisplayName(raw?.title || `Group ${index + 1}`) || `Group ${index + 1}`,
       avatarUrl: typeof raw?.avatarUrl === 'string' ? raw.avatarUrl : null,
       ownerUserId: ownerUserId || memberIds[0] || null,
       memberIds,
+      adminUserIds,
+      invitedUserIds: invitedUserIds.filter((id) => !memberIds.includes(id)),
+      joinRequestUserIds: joinRequestUserIds.filter((id) => !memberIds.includes(id)),
+      pendingInvites,
       createdAt: Number(raw?.createdAt) || Date.now(),
       updatedAt: Number(raw?.updatedAt) || Number(raw?.createdAt) || Date.now()
     };
@@ -148,13 +179,65 @@ function createLanServer({ port = 4000, userDataPath }) {
     return Array.isArray(rawGroups) ? rawGroups.map(normalizeGroupRecord) : [];
   }
 
+  function normalizeNotificationRecord(raw) {
+    const kind =
+      raw?.kind === 'group'
+        ? 'group'
+        : raw?.kind === 'logout'
+        ? 'logout'
+        : 'login';
+  
+    const fallbackUserName =
+      safeDisplayName(raw?.userName || raw?.actorName || raw?.name || '') || 'Unknown';
+  
+    const title =
+      safeDisplayName(
+        raw?.title || (kind === 'group' ? 'Group update' : fallbackUserName)
+      ) || (kind === 'group' ? 'Group update' : fallbackUserName);
+  
+    const body = String(
+      raw?.body ||
+        raw?.message ||
+        (kind === 'group'
+          ? ''
+          : kind === 'logout'
+          ? `${fallbackUserName} logged out`
+          : `${fallbackUserName} logged in`)
+    )
+      .trim()
+      .slice(0, 240);
+  
+    return {
+      id: String(raw?.id || createId('ntf')),
+      recipientUserId: String(raw?.recipientUserId || ''),
+      actorUserId: String(raw?.actorUserId || raw?.userId || ''),
+      kind,
+      userName: fallbackUserName,
+      title,
+      body,
+      avatarUrl: typeof raw?.avatarUrl === 'string' ? raw.avatarUrl : null,
+      groupId: raw?.groupId ? String(raw.groupId) : null,
+      createdAt: Number(raw?.createdAt) || Date.now()
+    };
+  }
+  
+  function normalizeNotifications(rawNotifications) {
+    return Array.isArray(rawNotifications)
+      ? rawNotifications.map(normalizeNotificationRecord)
+      : [];
+  }
+
   function normalizeDbShape(raw) {
     return {
       users: normalizeUsers(raw?.users),
       groups: normalizeGroups(raw?.groups),
       messages: Array.isArray(raw?.messages) ? raw.messages : [],
+      notifications: normalizeNotifications(raw?.notifications),
       conversationStates: Array.isArray(raw?.conversationStates)
         ? raw.conversationStates
+        : [],
+      groupConversationStates: Array.isArray(raw?.groupConversationStates)
+        ? raw.groupConversationStates
         : [],
       messageStates: Array.isArray(raw?.messageStates)
         ? raw.messageStates
@@ -169,7 +252,9 @@ function createLanServer({ port = 4000, userDataPath }) {
         users: [],
         groups: [],
         messages: [],
+        notifications: [],
         conversationStates: [],
+        groupConversationStates: [],
         messageStates: [],
         sessions: []
       };
@@ -185,6 +270,7 @@ function createLanServer({ port = 4000, userDataPath }) {
         users: [],
         groups: [],
         messages: [],
+        notifications: [],
         conversationStates: [],
         messageStates: [],
         sessions: []
@@ -233,8 +319,331 @@ function createLanServer({ port = 4000, userDataPath }) {
       avatarUrl: group.avatarUrl || null,
       ownerUserId: group.ownerUserId || null,
       memberIds: Array.isArray(group.memberIds) ? [...group.memberIds] : [],
+      adminUserIds: Array.isArray(group.adminUserIds) ? [...group.adminUserIds] : [],
+      invitedUserIds: Array.isArray(group.invitedUserIds) ? [...group.invitedUserIds] : [],
+      joinRequestUserIds: Array.isArray(group.joinRequestUserIds)
+        ? [...group.joinRequestUserIds]
+        : [],
       createdAt: group.createdAt,
       updatedAt: group.updatedAt
+    };
+  }
+
+  function isGroupOwner(groupId, userId) {
+    const group = getGroupById(groupId);
+    return !!group && group.ownerUserId === userId;
+  }
+  
+  function isGroupAdmin(groupId, userId) {
+    const group = getGroupById(groupId);
+    if (!group) return false;
+    return group.ownerUserId === userId || (group.adminUserIds || []).includes(userId);
+  }
+  
+  function uniqueIds(values) {
+    return [...new Set((values || []).map((v) => String(v || '')).filter(Boolean))];
+  }
+  
+  function resyncUserGroupRooms(userId) {
+    const socketId = onlineSockets.get(userId);
+    if (!socketId) return;
+  
+    const socket = io.sockets.sockets.get(socketId);
+    if (socket) {
+      syncSocketGroupRooms(socket, userId);
+    }
+  }
+  
+  function getPendingGroupInvitesForUser(userId) {
+    return db.groups
+      .filter(
+        (group) =>
+          group.invitedUserIds.includes(userId) ||
+          group.joinRequestUserIds.includes(userId)
+      )
+      .map((group) => ({
+        groupId: group.id,
+        title: group.title,
+        avatarUrl: group.avatarUrl || null,
+        ownerUserId: group.ownerUserId || null,
+        adminUserIds: [...(group.adminUserIds || [])],
+        status: group.joinRequestUserIds.includes(userId) ? 'requested' : 'invited',
+        createdAt: group.updatedAt || group.createdAt
+      }))
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+  
+  function inviteUserToGroup({ groupId, inviterUserId, targetUserId }) {
+    const group = getGroupById(groupId);
+    const target = getUserById(targetUserId);
+  
+    if (!group) return { ok: false, error: 'Group not found' };
+    if (!target) return { ok: false, error: 'User not found' };
+  
+    if (!group.memberIds.includes(inviterUserId)) {
+      return { ok: false, error: 'Only group members can invite users' };
+    }
+  
+    if (group.memberIds.includes(targetUserId)) {
+      return { ok: false, error: 'User is already a member' };
+    }
+  
+    const requiresOwnerApproval = group.ownerUserId !== inviterUserId;
+  
+    group.invitedUserIds = uniqueIds([...(group.invitedUserIds || []), targetUserId]);
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== targetUserId);
+    group.pendingInvites = [
+      ...((group.pendingInvites || []).filter((item) => item.userId !== targetUserId)),
+      {
+        userId: targetUserId,
+        invitedByUserId: inviterUserId,
+        createdAt: Date.now()
+      }
+    ];
+    group.updatedAt = Date.now();
+  
+    saveDb();
+  
+    return {
+      ok: true,
+      group: sanitizeGroup(group),
+      requiresOwnerApproval
+    };
+  }
+  
+  function acceptGroupInvite({ groupId, userId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!(group.invitedUserIds || []).includes(userId)) {
+      return { ok: false, error: 'Invitation not found' };
+    }
+  
+    const inviteEntry =
+      (group.pendingInvites || []).find((item) => item.userId === userId) || null;
+  
+    const joinedDirectly =
+      !!inviteEntry &&
+      !!group.ownerUserId &&
+      inviteEntry.invitedByUserId === group.ownerUserId;
+  
+    group.invitedUserIds = (group.invitedUserIds || []).filter((id) => id !== userId);
+    group.pendingInvites = (group.pendingInvites || []).filter((item) => item.userId !== userId);
+  
+    if (joinedDirectly) {
+      group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== userId);
+      group.memberIds = uniqueIds([...(group.memberIds || []), userId]);
+      group.updatedAt = Date.now();
+  
+      saveDb();
+      resyncUserGroupRooms(userId);
+  
+      return {
+        ok: true,
+        group: sanitizeGroup(group),
+        joinedDirectly: true,
+        pendingOwnerApproval: false
+      };
+    }
+  
+    group.joinRequestUserIds = uniqueIds([...(group.joinRequestUserIds || []), userId]);
+    group.updatedAt = Date.now();
+  
+    saveDb();
+  
+    return {
+      ok: true,
+      group: sanitizeGroup(group),
+      joinedDirectly: false,
+      pendingOwnerApproval: true
+    };
+  }
+  
+  function declineGroupInvite({ groupId, userId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    group.invitedUserIds = (group.invitedUserIds || []).filter((id) => id !== userId);
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== userId);
+    group.pendingInvites = (group.pendingInvites || []).filter((item) => item.userId !== userId);
+    group.updatedAt = Date.now();
+  
+    saveDb();
+    return { ok: true, group: sanitizeGroup(group) };
+  }
+  
+  function approveGroupJoinRequest({ groupId, approverUserId, userId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupOwner(groupId, approverUserId)) {
+      return { ok: false, error: 'Only the group owner can approve requests' };
+    }
+  
+    if (!(group.joinRequestUserIds || []).includes(userId)) {
+      return { ok: false, error: 'Join request not found' };
+    }
+  
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== userId);
+    group.invitedUserIds = (group.invitedUserIds || []).filter((id) => id !== userId);
+    group.pendingInvites = (group.pendingInvites || []).filter((item) => item.userId !== userId);
+    group.memberIds = uniqueIds([...(group.memberIds || []), userId]);
+  
+    if (!group.ownerUserId) {
+      group.ownerUserId = approverUserId;
+    }
+  
+    if (!group.adminUserIds.includes(group.ownerUserId)) {
+      group.adminUserIds.unshift(group.ownerUserId);
+    }
+  
+    group.updatedAt = Date.now();
+  
+    saveDb();
+    resyncUserGroupRooms(userId);
+  
+    return { ok: true, group: sanitizeGroup(group) };
+  }
+  
+  function rejectGroupJoinRequest({ groupId, approverUserId, userId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupOwner(groupId, approverUserId)) {
+      return { ok: false, error: 'Only the group owner can reject requests' };
+    }
+  
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== userId);
+    group.pendingInvites = (group.pendingInvites || []).filter((item) => item.userId !== userId);
+    group.updatedAt = Date.now();
+  
+    saveDb();
+    return { ok: true, group: sanitizeGroup(group) };
+  }
+  
+  function setGroupAdminRole({ groupId, actingUserId, targetUserId, makeAdmin }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupOwner(groupId, actingUserId)) {
+      return { ok: false, error: 'Only the group owner can change admin roles' };
+    }
+  
+    if (!group.memberIds.includes(targetUserId)) {
+      return { ok: false, error: 'User is not a member of this group' };
+    }
+  
+    if (group.ownerUserId === targetUserId && !makeAdmin) {
+      return { ok: false, error: 'Owner must remain an admin' };
+    }
+  
+    if (makeAdmin) {
+      group.adminUserIds = uniqueIds([...(group.adminUserIds || []), targetUserId]);
+    } else {
+      group.adminUserIds = (group.adminUserIds || []).filter((id) => id !== targetUserId);
+      if (group.ownerUserId && !group.adminUserIds.includes(group.ownerUserId)) {
+        group.adminUserIds.unshift(group.ownerUserId);
+      }
+    }
+  
+    group.updatedAt = Date.now();
+    saveDb();
+  
+    return { ok: true, group: sanitizeGroup(group) };
+  }
+  
+  function removeGroupMember({ groupId, actingUserId, targetUserId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupAdmin(groupId, actingUserId)) {
+      return { ok: false, error: 'Only group admins can remove members' };
+    }
+  
+    if (group.ownerUserId === targetUserId) {
+      return { ok: false, error: 'Group owner cannot be removed' };
+    }
+  
+    const targetIsAdmin = (group.adminUserIds || []).includes(targetUserId);
+    if (targetIsAdmin && !isGroupOwner(groupId, actingUserId)) {
+      return { ok: false, error: 'Only the owner can remove another admin' };
+    }
+  
+    group.memberIds = (group.memberIds || []).filter((id) => id !== targetUserId);
+    group.adminUserIds = (group.adminUserIds || []).filter((id) => id !== targetUserId);
+    group.invitedUserIds = (group.invitedUserIds || []).filter((id) => id !== targetUserId);
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== targetUserId);
+    group.updatedAt = Date.now();
+  
+    saveDb();
+    resyncUserGroupRooms(targetUserId);
+  
+    return { ok: true, group: sanitizeGroup(group) };
+  }
+
+  function leaveGroup({ groupId, userId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!group.memberIds.includes(userId)) {
+      return { ok: false, error: 'You are not a member of this group' };
+    }
+  
+    if (group.ownerUserId === userId) {
+      return { ok: false, error: 'Group owner cannot leave the group. Delete the group instead.' };
+    }
+  
+    group.memberIds = (group.memberIds || []).filter((id) => id !== userId);
+    group.adminUserIds = (group.adminUserIds || []).filter((id) => id !== userId);
+    group.invitedUserIds = (group.invitedUserIds || []).filter((id) => id !== userId);
+    group.joinRequestUserIds = (group.joinRequestUserIds || []).filter((id) => id !== userId);
+    group.pendingInvites = (group.pendingInvites || []).filter((item) => item.userId !== userId);
+    group.updatedAt = Date.now();
+  
+    saveDb();
+    resyncUserGroupRooms(userId);
+  
+    return {
+      ok: true,
+      group: sanitizeGroup(group)
+    };
+  }
+  
+  function deleteGroup({ groupId, actingUserId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (group.ownerUserId !== actingUserId) {
+      return { ok: false, error: 'Only the group owner can delete this group' };
+    }
+  
+    const affectedUserIds = uniqueIds([
+      ...(group.memberIds || []),
+      ...(group.invitedUserIds || []),
+      ...(group.joinRequestUserIds || [])
+    ]);
+  
+    const deletedMessageIds = new Set(
+      db.messages
+        .filter((message) => message.groupId === groupId)
+        .map((message) => message.id)
+    );
+  
+    db.messages = db.messages.filter((message) => message.groupId !== groupId);
+    db.messageStates = db.messageStates.filter(
+      (state) => !deletedMessageIds.has(state.messageId)
+    );
+    db.groups = db.groups.filter((item) => item.id !== groupId);
+  
+    saveDb();
+  
+    for (const userId of affectedUserIds) {
+      resyncUserGroupRooms(userId);
+    }
+  
+    return {
+      ok: true,
+      groupId
     };
   }
 
@@ -242,25 +651,27 @@ function createLanServer({ port = 4000, userDataPath }) {
     const uniqueMemberIds = [
       ...new Set([ownerUserId, ...(Array.isArray(memberIds) ? memberIds : [])].filter(Boolean))
     ];
-
+  
     const now = Date.now();
-
+  
     const group = {
       id: createId('g'),
       title: safeDisplayName(title || 'New Group') || 'New Group',
       avatarUrl: null,
       ownerUserId,
       memberIds: uniqueMemberIds,
+      adminUserIds: ownerUserId ? [ownerUserId] : [],
+      invitedUserIds: [],
+      joinRequestUserIds: [],
       createdAt: now,
       updatedAt: now
     };
-
+  
     db.groups.push(group);
     saveDb();
-
+  
     return group;
   }
-
   function syncSocketGroupRooms(socket, userId) {
     const desiredRooms = new Set(
       getGroupsForUser(userId).map((group) => `group:${group.id}`)
@@ -299,6 +710,207 @@ function createLanServer({ port = 4000, userDataPath }) {
       mustChangePassword: isSelf || isAdmin ? !!user.mustChangePassword : undefined,
       createdAt: user.createdAt
     };
+  }
+
+  function sanitizeNotification(notification) {
+    const kind =
+      notification.kind === 'group'
+        ? 'group'
+        : notification.kind === 'logout'
+        ? 'logout'
+        : 'login';
+  
+    return {
+      id: notification.id,
+      kind,
+      userId: notification.actorUserId || null,
+      userName: notification.userName || notification.title || 'Unknown',
+      title:
+        notification.title ||
+        (kind === 'group' ? 'Group update' : notification.userName || 'Notification'),
+      body:
+        notification.body ||
+        (kind === 'group'
+          ? ''
+          : kind === 'logout'
+          ? `${notification.userName} logged out`
+          : `${notification.userName} logged in`),
+      avatarUrl: notification.avatarUrl || null,
+      groupId: notification.groupId || null,
+      createdAt: notification.createdAt
+    };
+  }
+  
+  function createNotifications(entries) {
+    const notifications = entries
+      .map((entry) =>
+        normalizeNotificationRecord({
+          id: createId('ntf'),
+          ...entry
+        })
+      )
+      .filter(
+        (item) => item.recipientUserId && !!getUserById(item.recipientUserId)
+      );
+  
+    if (!notifications.length) return [];
+  
+    db.notifications.push(...notifications);
+    pruneNotificationsForRecipients(
+      notifications.map((item) => item.recipientUserId)
+    );
+    saveDb();
+  
+    for (const notification of notifications) {
+      const socketId = onlineSockets.get(notification.recipientUserId);
+      if (socketId) {
+        io.to(socketId).emit('notification:new', sanitizeNotification(notification));
+      }
+    }
+  
+    return notifications;
+  }
+  
+  function notifyUsers(userIds, payload) {
+    const recipientIds = uniqueIds(userIds).filter(Boolean);
+    if (!recipientIds.length) return [];
+  
+    return createNotifications(
+      recipientIds.map((recipientUserId) => ({
+        recipientUserId,
+        actorUserId: payload.actorUserId || '',
+        kind: payload.kind || 'group',
+        userName: payload.userName || getUserDisplayName(payload.actorUserId),
+        title: payload.title || 'Notification',
+        body: payload.body || '',
+        avatarUrl:
+          typeof payload.avatarUrl === 'string' ? payload.avatarUrl : null,
+        groupId: payload.groupId || null
+      }))
+    );
+  }
+  
+  function notifyGroupMembers(group, body, options = {}) {
+    if (!group) return [];
+  
+    const excludeUserIds = new Set(uniqueIds(options.excludeUserIds || []));
+  
+    return notifyUsers(
+      (group.memberIds || []).filter((userId) => !excludeUserIds.has(userId)),
+      {
+        kind: 'group',
+        actorUserId: options.actorUserId || '',
+        userName: getUserDisplayName(options.actorUserId),
+        title: group.title,
+        body,
+        avatarUrl: group.avatarUrl || null,
+        groupId: group.id
+      }
+    );
+  }
+  
+  function notifyGroupOwner(group, body, options = {}) {
+    if (!group?.ownerUserId) return [];
+  
+    return notifyUsers([group.ownerUserId], {
+      kind: 'group',
+      actorUserId: options.actorUserId || '',
+      userName: getUserDisplayName(options.actorUserId),
+      title: group.title,
+      body,
+      avatarUrl: group.avatarUrl || null,
+      groupId: group.id
+    });
+  }
+  
+  function notifyAffectedUsers(userIds, payload) {
+    return notifyUsers(userIds, payload);
+  }
+  
+  function getNotificationsForUser(userId) {
+    return db.notifications
+      .filter((item) => item.recipientUserId === userId)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map(sanitizeNotification);
+  }
+  
+  function clearNotificationsForUser(userId) {
+    const before = db.notifications.length;
+  
+    db.notifications = db.notifications.filter(
+      (item) => item.recipientUserId !== userId
+    );
+  
+    const clearedCount = before - db.notifications.length;
+  
+    if (clearedCount > 0) {
+      saveDb();
+    }
+  
+    return {
+      ok: true,
+      clearedCount
+    };
+  }
+  
+  function getPresenceNotificationRecipients(actorUserId) {
+    return db.users.filter(
+      (user) =>
+        user.id !== actorUserId &&
+        (user.role === 'admin' || user.isApproved)
+    );
+  }
+  
+  function pruneNotificationsForRecipients(recipientIds, maxPerUser = 200) {
+    const uniqueRecipientIds = [...new Set(recipientIds)];
+  
+    for (const recipientUserId of uniqueRecipientIds) {
+      const keepIds = new Set(
+        db.notifications
+          .filter((item) => item.recipientUserId === recipientUserId)
+          .sort((a, b) => b.createdAt - a.createdAt)
+          .slice(0, maxPerUser)
+          .map((item) => item.id)
+      );
+  
+      db.notifications = db.notifications.filter(
+        (item) =>
+          item.recipientUserId !== recipientUserId || keepIds.has(item.id)
+      );
+    }
+  }
+  
+  function persistPresenceNotifications(user, kind) {
+    const recipients = getPresenceNotificationRecipients(user.id);
+    if (!recipients.length) return [];
+  
+    return notifyUsers(
+      recipients.map((recipient) => recipient.id),
+      {
+        kind: kind === 'logout' ? 'logout' : 'login',
+        actorUserId: user.id,
+        userName: user.name || user.userId,
+        title: user.name || user.userId,
+        body:
+          kind === 'logout'
+            ? `${user.name || user.userId} logged out`
+            : `${user.name || user.userId} logged in`,
+        avatarUrl: user.avatarUrl || null,
+        groupId: null
+      }
+    );
+  }
+  
+  function emitNotificationsToRecipients(notifications) {
+    for (const notification of notifications) {
+      const socketId = onlineSockets.get(notification.recipientUserId);
+      if (!socketId) continue;
+  
+      io.to(socketId).emit(
+        'notification:user-presence',
+        sanitizeNotification(notification)
+      );
+    }
   }
 
   function getVisibleUsersFor(viewer) {
@@ -439,6 +1051,93 @@ function createLanServer({ port = 4000, userDataPath }) {
     };
   }
 
+  function getGroupConversationState(userId, groupId) {
+    return (
+      db.groupConversationStates.find(
+        (item) => item.userId === userId && item.groupId === groupId
+      ) || null
+    );
+  }
+  
+  function ensureGroupConversationState(userId, groupId) {
+    const existing = getGroupConversationState(userId, groupId);
+    if (existing) return existing;
+  
+    const state = {
+      id: createId('gcs'),
+      userId,
+      groupId,
+      conversationKey: groupConversationKey(groupId),
+      clearedAt: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+  
+    db.groupConversationStates.push(state);
+    return state;
+  }
+  
+  function getGroupConversationClearedAt(userId, groupId) {
+    const state = getGroupConversationState(userId, groupId);
+    return state?.clearedAt || 0;
+  }
+  
+  function clearGroupConversationForUser({ userId, groupId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupMember(groupId, userId)) {
+      return { ok: false, error: 'Unauthorized group access' };
+    }
+  
+    const now = Date.now();
+    const state = ensureGroupConversationState(userId, groupId);
+  
+    state.clearedAt = now;
+    state.updatedAt = now;
+  
+    saveDb();
+  
+    return {
+      ok: true,
+      userId,
+      groupId,
+      conversationKey: groupConversationKey(groupId),
+      clearedAt: now
+    };
+  }
+  
+  function deleteGroupConversation({ groupId, byUserId }) {
+    const group = getGroupById(groupId);
+    if (!group) return { ok: false, error: 'Group not found' };
+  
+    if (!isGroupOwner(groupId, byUserId)) {
+      return { ok: false, error: 'Only the group owner can clear chat for everyone' };
+    }
+  
+    const deletedMessageIds = new Set(
+      db.messages
+        .filter((message) => message.groupId === groupId)
+        .map((message) => message.id)
+    );
+  
+    db.messages = db.messages.filter((message) => message.groupId !== groupId);
+    db.messageStates = db.messageStates.filter(
+      (state) => !deletedMessageIds.has(state.messageId)
+    );
+    db.groupConversationStates = db.groupConversationStates.filter(
+      (state) => state.groupId !== groupId
+    );
+  
+    saveDb();
+  
+    return {
+      ok: true,
+      groupId,
+      conversationKey: groupConversationKey(groupId),
+      byUserId
+    };
+  }
   function emitActiveChatTargets() {
     io.emit('chat:active-map', getActiveChatTargetsPayload());
   }
@@ -473,9 +1172,24 @@ function createLanServer({ port = 4000, userDataPath }) {
       user: sanitizeUser(user, user),
       users: getVisibleUsersFor(user),
       groups: getGroupsForUser(user.id).map(sanitizeGroup),
+      groupInvites: getPendingGroupInvitesForUser(user.id),
+      notifications: getNotificationsForUser(user.id),
       ...getPresencePayload(),
       ...getActiveChatTargetsPayload()
     };
+  }
+
+  function emitGroupNoticeToOwner(group, message, kind = 'info') {
+    if (!group?.ownerUserId) return;
+  
+    emitGroupNoticeToUsers([group.ownerUserId], {
+      id: createId('gnt'),
+      kind,
+      groupId: group.id,
+      title: group.title,
+      message,
+      createdAt: Date.now()
+    });
   }
 
   function findMessageById(messageId) {
@@ -616,9 +1330,12 @@ function createLanServer({ port = 4000, userDataPath }) {
 
   function getGroupMessages(groupId, viewerUserId) {
     if (!isGroupMember(groupId, viewerUserId)) return [];
-
+  
+    const clearedAt = getGroupConversationClearedAt(viewerUserId, groupId);
+  
     return db.messages
       .filter((message) => message.groupId === groupId)
+      .filter((message) => message.createdAt > clearedAt)
       .filter((message) => !isMessageHiddenForUser(viewerUserId, message.id))
       .sort((a, b) => a.createdAt - b.createdAt);
   }
@@ -629,7 +1346,7 @@ function createLanServer({ port = 4000, userDataPath }) {
       : message.attachment
       ? [message.attachment]
       : [];
-
+  
     return {
       id: message.id,
       conversationKey:
@@ -655,7 +1372,10 @@ function createLanServer({ port = 4000, userDataPath }) {
       deletedAt: message.deletedAt || null,
       deletedByUserId: message.deletedByUserId || null,
       deliveredAt: message.deliveredAt || null,
-      readAt: message.readAt || null
+      readAt: message.readAt || null,
+      groupReadByUserIds: Array.isArray(message.groupReadByUserIds)
+        ? [...message.groupReadByUserIds]
+        : null
     };
   }
 
@@ -705,7 +1425,8 @@ function createLanServer({ port = 4000, userDataPath }) {
       deletedAt: null,
       deletedByUserId: null,
       deliveredAt: null,
-      readAt: null
+      readAt: null,
+      groupReadByUserIds: groupId ? [fromUserId] : null
     };
 
     db.messages.push(message);
@@ -736,6 +1457,53 @@ function createLanServer({ port = 4000, userDataPath }) {
     });
   }
 
+  function markGroupMessagesAsRead({ groupId, userId, messageIds }) {
+    const group = getGroupById(groupId);
+  
+    if (!group || !isGroupMember(groupId, userId)) {
+      return { ok: false, error: 'Unauthorized group access' };
+    }
+  
+    const wantedIds = new Set(
+      Array.isArray(messageIds)
+        ? messageIds.map((v) => String(v || '')).filter(Boolean)
+        : []
+    );
+  
+    if (!wantedIds.size) {
+      return { ok: true, groupId, userId, messageIds: [] };
+    }
+  
+    const updatedIds = [];
+  
+    for (const message of db.messages) {
+      if (message.groupId !== groupId) continue;
+      if (!wantedIds.has(message.id)) continue;
+      if (message.fromUserId === userId) continue;
+      if (message.type === 'deleted') continue;
+  
+      const current = Array.isArray(message.groupReadByUserIds)
+        ? message.groupReadByUserIds
+        : [];
+  
+      if (!current.includes(userId)) {
+        message.groupReadByUserIds = [...current, userId];
+        updatedIds.push(message.id);
+      }
+    }
+  
+    if (updatedIds.length) {
+      saveDb();
+    }
+  
+    return {
+      ok: true,
+      groupId,
+      userId,
+      messageIds: updatedIds
+    };
+  }
+
   function deleteMessage({ messageId, byUserId }) {
     const message = findMessageById(messageId);
     if (!message) return { ok: false, error: 'Message not found' };
@@ -755,6 +1523,50 @@ function createLanServer({ port = 4000, userDataPath }) {
     saveDb();
 
     return { ok: true, message };
+  }
+
+  function deleteOwnGroupMessages({ groupId, byUserId }) {
+    const group = getGroupById(groupId);
+  
+    if (!group) {
+      return { ok: false, error: 'Group not found' };
+    }
+  
+    if (!isGroupMember(groupId, byUserId)) {
+      return { ok: false, error: 'Unauthorized group access' };
+    }
+  
+    const updatedMessages = [];
+    const now = Date.now();
+  
+    for (const message of db.messages) {
+      if (message.groupId !== groupId) continue;
+      if (message.fromUserId !== byUserId) continue;
+      if (message.type === 'deleted') continue;
+      if (message.type === 'system') continue;
+  
+      message.text = '';
+      message.attachment = null;
+      message.attachments = null;
+      message.type = 'deleted';
+      message.call = null;
+      message.system = null;
+      message.deletedAt = now;
+      message.deletedByUserId = byUserId;
+  
+      updatedMessages.push(message);
+    }
+  
+    if (updatedMessages.length) {
+      saveDb();
+    }
+  
+    return {
+      ok: true,
+      groupId,
+      deletedCount: updatedMessages.length,
+      messages: updatedMessages
+    };
   }
 
   function normalizeCallMode(mode) {
@@ -871,6 +1683,46 @@ function createLanServer({ port = 4000, userDataPath }) {
     io.emit('presence:update', getPresencePayload());
   }
 
+  function emitGroupConversationClearedForMe({
+    groupId,
+    conversationKey,
+    userId,
+    clearedAt
+  }) {
+    const socketId = onlineSockets.get(userId);
+    if (!socketId) return;
+  
+    io.to(socketId).emit('group:conversation:cleared-for-me', {
+      groupId,
+      conversationKey,
+      userId,
+      clearedAt
+    });
+  }
+  
+  function emitGroupConversationDeleted({
+    groupId,
+    conversationKey,
+    byUserId
+  }) {
+    io.to(`group:${groupId}`).emit('group:conversation:deleted', {
+      groupId,
+      conversationKey,
+      byUserId
+    });
+  }
+
+  function createPresenceNotification(user, kind) {
+    return {
+      id: createId('ntf'),
+      kind, // 'login' | 'logout'
+      userId: user.id,
+      userName: user.name || user.userId,
+      avatarUrl: user.avatarUrl || null,
+      createdAt: Date.now()
+    };
+  }
+
   function emitMessageToParticipants(message) {
     const payload = serializeMessage(message);
 
@@ -940,6 +1792,63 @@ function createLanServer({ port = 4000, userDataPath }) {
     if (calleeSocketId) {
       io.to(calleeSocketId).emit('call:ended', { fromUserId });
     }
+  }
+
+  function getUserDisplayName(userId) {
+    const user = getUserById(userId);
+    return user?.name || user?.userId || 'Someone';
+  }
+  
+  function emitGroupNoticeToUsers(userIds, payload) {
+    for (const userId of uniqueIds(userIds)) {
+      const socketId = onlineSockets.get(userId);
+      if (!socketId) continue;
+  
+      io.to(socketId).emit('group:notice', payload);
+    }
+  }
+  
+  function notifyExistingGroupMembers(group, message, kind = 'info') {
+    if (!group) return;
+  
+    emitGroupNoticeToUsers(group.memberIds || [], {
+      id: createId('gnt'),
+      kind,
+      groupId: group.id,
+      title: group.title,
+      message,
+      createdAt: Date.now()
+    });
+  }
+  
+  function notifyDeletedGroupMembers({ groupId, title, memberIds, message }) {
+    emitGroupNoticeToUsers(memberIds || [], {
+      id: createId('gnt'),
+      kind: 'deleted',
+      groupId,
+      title,
+      message,
+      createdAt: Date.now()
+    });
+  }
+  
+  function addGroupInfoMessage({ groupId, actorUserId, text }) {
+    const group = getGroupById(groupId);
+    if (!group) return null;
+  
+    const message = addMessage({
+      fromUserId: actorUserId || group.ownerUserId || '',
+      groupId,
+      type: 'system',
+      text: '',
+      system: {
+        kind: 'info',
+        text
+      }
+    });
+  
+    emitMessageToParticipants(message);
+    return message;
   }
 
   function revokeUserAccess(targetUserId, reason = 'Your login permission was removed by admin') {
@@ -1083,10 +1992,419 @@ function createLanServer({ port = 4000, userDataPath }) {
     });
   });
 
+  app.get('/api/notifications', requireAuth, (req, res) => {
+    res.json({
+      ok: true,
+      notifications: getNotificationsForUser(req.user.id)
+    });
+  });
+  
+  app.post('/api/notifications/clear', requireAuth, (req, res) => {
+    const result = clearNotificationsForUser(req.user.id);
+    res.json(result);
+  });
+
   app.get('/api/groups', requireAuth, (req, res) => {
     res.json({
       ok: true,
       groups: getGroupsForUser(req.user.id).map(sanitizeGroup)
+    });
+  });
+
+  app.post('/api/groups/:groupId/invite', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const userId = String(req.body?.userId || '');
+  
+    const result = inviteUserToGroup({
+      groupId,
+      inviterUserId: req.user.id,
+      targetUserId: userId
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    const group = getGroupById(groupId);
+    const targetUser = getUserById(userId);
+  
+    if (group && targetUser) {
+      const text = `${getUserDisplayName(req.user.id)} invited ${getUserDisplayName(targetUser.id)} to the group`;
+      addGroupInfoMessage({
+        groupId: group.id,
+        actorUserId: req.user.id,
+        text
+      });
+      notifyExistingGroupMembers(group, text);
+    }
+  
+    emitUsersChanged();
+
+    const invitedUser = getUserById(userId);
+
+    if (group && invitedUser) {
+      notifyGroupMembers(
+        group,
+        `${getUserDisplayName(req.user.id)} invited ${invitedUser.name || invitedUser.userId} to the group`,
+        {
+          actorUserId: req.user.id,
+          excludeUserIds: [req.user.id]
+        }
+      );
+    }
+    res.json(result);
+  });
+  
+  app.post('/api/groups/:groupId/invite/accept', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+  
+    const result = acceptGroupInvite({
+      groupId,
+      userId: req.user.id
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    const group = getGroupById(groupId);
+    const actorName = getUserDisplayName(req.user.id);
+  
+    if (group) {
+      if (result.joinedDirectly) {
+        notifyGroupOwner(
+          group,
+          `${actorName} accepted the invitation and joined the group`,
+          { actorUserId: req.user.id }
+        );
+  
+        notifyGroupMembers(group, `${actorName} joined the group`, {
+          actorUserId: req.user.id,
+          excludeUserIds: [req.user.id]
+        });
+      } else {
+        notifyGroupOwner(
+          group,
+          `${actorName} accepted the invitation and is waiting for your approval`,
+          { actorUserId: req.user.id }
+        );
+      }
+    }
+  
+    emitUsersChanged();
+    res.json(result);
+  });
+  
+  app.post('/api/groups/:groupId/invite/decline', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const group = getGroupById(groupId);
+  
+    const result = declineGroupInvite({
+      groupId,
+      userId: req.user.id
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    if (group) {
+      notifyGroupOwner(
+        group,
+        `${getUserDisplayName(req.user.id)} declined the invitation`,
+        { actorUserId: req.user.id }
+      );
+    }
+  
+    emitUsersChanged();
+    res.json(result);
+  });
+
+  app.post('/api/groups/:groupId/leave', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+  
+    const result = leaveGroup({
+      groupId,
+      userId: req.user.id
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    const group = getGroupById(groupId);
+    if (group) {
+      const text = `${getUserDisplayName(req.user.id)} left the group`;
+      addGroupInfoMessage({
+        groupId: group.id,
+        actorUserId: req.user.id,
+        text
+      });
+      notifyExistingGroupMembers(group, text);
+    }
+  
+    emitUsersChanged();
+
+    if (group) {
+      notifyGroupMembers(group, `${getUserDisplayName(req.user.id)} left the group`, {
+        actorUserId: req.user.id
+      });
+    }
+
+    res.json(result);
+  });
+  
+  app.delete('/api/groups/:groupId', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const groupBefore = getGroupById(groupId);
+    const memberIdsBefore = groupBefore ? [...(groupBefore.memberIds || [])] : [];
+
+    const result = deleteGroup({
+      groupId,
+      actingUserId: req.user.id
+    });
+
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    if (groupBefore) {
+      notifyAffectedUsers(
+        memberIdsBefore.filter((id) => id !== req.user.id),
+        {
+          kind: 'group',
+          actorUserId: req.user.id,
+          userName: getUserDisplayName(req.user.id),
+          title: groupBefore.title,
+          body: `${getUserDisplayName(req.user.id)} deleted the group`,
+          avatarUrl: groupBefore.avatarUrl || null,
+          groupId: groupBefore.id
+        }
+      );
+    }
+
+    emitUsersChanged();
+    res.json(result);
+  });
+  
+  app.post('/api/groups/:groupId/requests/:userId/approve', requireAuth, (req, res) => {
+    const result = approveGroupJoinRequest({
+      groupId: String(req.params.groupId || ''),
+      approverUserId: req.user.id,
+      userId: String(req.params.userId || '')
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    emitUsersChanged();
+
+    const group = getGroupById(String(req.params.groupId || ''));
+    const approvedUserId = String(req.params.userId || '');
+    const approvedUserName = getUserDisplayName(approvedUserId);
+
+    if (group) {
+      notifyGroupMembers(
+        group,
+        `${approvedUserName} was approved and joined the group`,
+        {
+          actorUserId: req.user.id,
+          excludeUserIds: [req.user.id]
+        }
+      );
+    }
+    res.json(result);
+  });
+  
+  app.post('/api/groups/:groupId/requests/:userId/reject', requireAuth, (req, res) => {
+    const result = rejectGroupJoinRequest({
+      groupId: String(req.params.groupId || ''),
+      approverUserId: req.user.id,
+      userId: String(req.params.userId || '')
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    emitUsersChanged();
+    res.json(result);
+  });
+
+  app.patch('/api/groups/:groupId', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const group = getGroupById(groupId);
+  
+    const oldTitle = group.title;
+
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+  
+    if (!isGroupAdmin(groupId, req.user.id)) {
+      return res.status(403).json({ error: 'Only group admins can update group info' });
+    }
+  
+    const title = safeDisplayName(req.body?.title);
+  
+    if (!title) {
+      return res.status(400).json({ error: 'Group title is required' });
+    }
+  
+    const previousTitle = group.title;
+    group.title = title;
+    group.updatedAt = Date.now();
+  
+    saveDb();
+  
+    if (previousTitle !== title) {
+      const text = `${getUserDisplayName(req.user.id)} changed the group name to "${title}"`;
+      addGroupInfoMessage({
+        groupId: group.id,
+        actorUserId: req.user.id,
+        text
+      });
+      notifyExistingGroupMembers(group, text);
+    }
+  
+    emitUsersChanged();
+
+    notifyGroupMembers(
+      group,
+      `${getUserDisplayName(req.user.id)} changed the group name from "${oldTitle}" to "${group.title}"`,
+      {
+        actorUserId: req.user.id,
+        excludeUserIds: [req.user.id]
+      }
+    );
+  
+    res.json({
+      ok: true,
+      group: sanitizeGroup(group)
+    });
+  });
+  
+  app.post('/api/groups/:groupId/admins', requireAuth, (req, res) => {
+    const result = setGroupAdminRole({
+      groupId: String(req.params.groupId || ''),
+      actingUserId: req.user.id,
+      targetUserId: String(req.body?.userId || ''),
+      makeAdmin: !!req.body?.makeAdmin
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+
+    const group = getGroupById(String(req.params.groupId || ''));
+    const targetUserId = String(req.body?.userId || '');
+    const makeAdmin = !!req.body?.makeAdmin;
+    const actorName = getUserDisplayName(req.user.id);
+    const targetName = getUserDisplayName(targetUserId);
+
+    if (group) {
+      notifyGroupMembers(
+        group,
+        makeAdmin
+          ? `${targetName} was made a group admin by ${actorName}`
+          : `${actorName} removed ${targetName} as a group admin`,
+        {
+          actorUserId: req.user.id,
+          excludeUserIds: [req.user.id]
+        }
+      );
+    }
+  
+    emitUsersChanged();
+    res.json(result);
+  });
+  
+  app.delete('/api/groups/:groupId/members/:userId', requireAuth, (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const targetUserId = String(req.params.userId || '');
+    const groupBefore = getGroupById(groupId);
+  
+    const result = removeGroupMember({
+      groupId,
+      actingUserId: req.user.id,
+      targetUserId
+    });
+  
+    if (!result.ok) {
+      return res.status(400).json({ error: result.error });
+    }
+  
+    const groupAfter = getGroupById(groupId);
+    const targetName = getUserDisplayName(targetUserId);
+    const actorName = getUserDisplayName(req.user.id);
+  
+    notifyAffectedUsers(
+      uniqueIds([...(groupAfter?.memberIds || []), targetUserId]).filter(
+        (id) => id !== req.user.id
+      ),
+      {
+        kind: 'group',
+        actorUserId: req.user.id,
+        userName: actorName,
+        title: groupAfter?.title || groupBefore?.title || 'Group update',
+        body: `${targetName} was removed from the group by ${actorName}`,
+        avatarUrl: groupAfter?.avatarUrl || groupBefore?.avatarUrl || null,
+        groupId: groupId
+      }
+    );
+  
+    emitUsersChanged();
+    res.json(result);
+  });
+  
+  app.post('/api/groups/:groupId/avatar', requireAuth, upload.single('avatar'), (req, res) => {
+    const groupId = String(req.params.groupId || '');
+    const group = getGroupById(groupId);
+  
+    if (!group) {
+      return res.status(404).json({ error: 'Group not found' });
+    }
+  
+    if (!isGroupAdmin(groupId, req.user.id)) {
+      return res.status(403).json({ error: 'Only group admins can update the avatar' });
+    }
+  
+    if (!req.file) {
+      return res.status(400).json({ error: 'Avatar file is required' });
+    }
+  
+    if (!/^image\//.test(req.file.mimetype)) {
+      return res.status(400).json({ error: 'Group avatar must be an image' });
+    }
+  
+    group.avatarUrl = `/uploads/${req.file.filename}`;
+    group.updatedAt = Date.now();
+  
+    saveDb();
+
+    notifyGroupMembers(
+      group,
+      `${getUserDisplayName(req.user.id)} changed the group avatar`,
+      {
+        actorUserId: req.user.id,
+        excludeUserIds: [req.user.id]
+      }
+    );
+  
+    const text = `${getUserDisplayName(req.user.id)} updated the group avatar`;
+    addGroupInfoMessage({
+      groupId: group.id,
+      actorUserId: req.user.id,
+      text
+    });
+    notifyExistingGroupMembers(group, text);
+  
+    emitUsersChanged();
+  
+    res.json({
+      ok: true,
+      group: sanitizeGroup(group)
     });
   });
 
@@ -1372,27 +2690,33 @@ function createLanServer({ port = 4000, userDataPath }) {
         callback?.({ ok: false, error: 'Unauthorized' });
         return;
       }
-
+    
       const user = getUserById(session.userId);
       if (!user || !user.isApproved || !user.canLogin) {
         callback?.({ ok: false, error: 'Login is not allowed' });
         return;
       }
-
+    
+      const wasAlreadyOnline = onlineSockets.has(user.id);
+    
       socket.data.userId = user.id;
       socket.data.authToken = token;
-
+    
       onlineSockets.set(user.id, socket.id);
       idleUserIds.delete(user.id);
       activeChatTargets.set(user.id, null);
-
+    
       syncSocketGroupRooms(socket, user.id);
-
+    
       emitPresence();
       emitActiveChatTargets();
-
+    
       socket.broadcast.emit('users:changed');
-
+    
+      if (!wasAlreadyOnline) {
+        persistPresenceNotifications(user, 'login');
+      }
+    
       callback?.({
         ok: true,
         ...serializeAuthPayload(user)
@@ -1411,6 +2735,7 @@ function createLanServer({ port = 4000, userDataPath }) {
         ok: !!user,
         users: user ? getVisibleUsersFor(user) : [],
         groups: user ? getGroupsForUser(user.id).map(sanitizeGroup) : [],
+        groupInvites: user ? getPendingGroupInvitesForUser(user.id) : [],
         ...getPresencePayload(),
         ...getActiveChatTargetsPayload()
       });
@@ -1455,6 +2780,48 @@ function createLanServer({ port = 4000, userDataPath }) {
       }
 
       emitConversationClearedForMe(result);
+      callback?.(result);
+    });
+
+    socket.on('group:conversation:clear-for-me', ({ groupId }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+    
+      const result = clearGroupConversationForUser({
+        userId,
+        groupId: String(groupId || '')
+      });
+    
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      emitGroupConversationClearedForMe(result);
+      callback?.(result);
+    });
+    
+    socket.on('group:conversation:delete', ({ groupId }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+    
+      const result = deleteGroupConversation({
+        groupId: String(groupId || ''),
+        byUserId: userId
+      });
+    
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      emitGroupConversationDeleted(result);
       callback?.(result);
     });
 
@@ -1548,6 +2915,35 @@ function createLanServer({ port = 4000, userDataPath }) {
       callback?.({ ok: true, message: serializeMessage(message) });
     });
 
+    socket.on('group:read', ({ groupId, messageIds }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized' });
+        return;
+      }
+    
+      const result = markGroupMessagesAsRead({
+        groupId: String(groupId || ''),
+        userId,
+        messageIds: Array.isArray(messageIds) ? messageIds : []
+      });
+    
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      if (result.messageIds.length) {
+        io.to(`group:${result.groupId}`).emit('group:read:update', {
+          groupId: result.groupId,
+          userId: result.userId,
+          messageIds: result.messageIds
+        });
+      }
+    
+      callback?.(result);
+    });
+
     socket.on('message:delete', ({ messageId }, callback) => {
       const byUserId = socket.data.userId;
       if (!byUserId) {
@@ -1575,6 +2971,33 @@ function createLanServer({ port = 4000, userDataPath }) {
       }
 
       callback?.({ ok: true, message: payload });
+    });
+
+    socket.on('group:messages:delete-own', ({ groupId }, callback) => {
+      const userId = socket.data.userId;
+      if (!userId) {
+        callback?.({ ok: false, error: 'Unauthorized request' });
+        return;
+      }
+    
+      const result = deleteOwnGroupMessages({
+        groupId: String(groupId || ''),
+        byUserId: userId
+      });
+    
+      if (!result.ok) {
+        callback?.(result);
+        return;
+      }
+    
+      for (const message of result.messages) {
+        io.to(`group:${result.groupId}`).emit('message:deleted', serializeMessage(message));
+      }
+    
+      callback?.({
+        ok: true,
+        deletedCount: result.deletedCount
+      });
     });
 
     socket.on('message:delivered', ({ messageId }) => {
@@ -1807,13 +3230,19 @@ function createLanServer({ port = 4000, userDataPath }) {
     socket.on('disconnect', () => {
       const userId = socket.data.userId;
       if (!userId) return;
-
+    
       if (onlineSockets.get(userId) === socket.id) {
+        const user = getUserById(userId);
+    
         onlineSockets.delete(userId);
         idleUserIds.delete(userId);
         clearActiveChatTarget(userId);
         emitUsersChanged();
         emitPresence();
+    
+        if (user) {
+          persistPresenceNotifications(user, 'logout');
+        }
       }
     });
   });
