@@ -876,6 +876,270 @@ function getGroupRoleLabel(group: GroupChat | null, userId: string) {
   return 'Member';
 }
 
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M9 3.5H15L16 5H20"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5 5H19"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <path
+        d="M7 7L7.7 18.2C7.8 19.2 8.6 20 9.6 20H14.4C15.4 20 16.2 19.2 16.3 18.2L17 7"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M10 10V16"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <path
+        d="M14 10V16"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function PersonIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 12C14.2 12 16 10.2 16 8C16 5.8 14.2 4 12 4C9.8 4 8 5.8 8 8C8 10.2 9.8 12 12 12Z"
+        stroke="currentColor"
+        strokeWidth="1.9"
+      />
+      <path
+        d="M5 20C5.8 16.9 8.5 15 12 15C15.5 15 18.2 16.9 19 20"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function GroupUsersIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M9 13C11 13 12.5 11.4 12.5 9.5C12.5 7.6 11 6 9 6C7 6 5.5 7.6 5.5 9.5C5.5 11.4 7 13 9 13Z"
+        stroke="currentColor"
+        strokeWidth="1.9"
+      />
+      <path
+        d="M15.5 12C17.1 11.8 18.3 10.4 18.3 8.8C18.3 7.1 17 5.7 15.3 5.5"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <path
+        d="M3.8 19C4.5 16.4 6.8 15 9.6 15C12.4 15 14.7 16.4 15.4 19"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <path
+        d="M16 15.5C17.9 15.8 19.5 17 20.2 19"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ChatBubbleIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M7 18L4 20V6.8C4 5.8 4.8 5 5.8 5H18.2C19.2 5 20 5.8 20 6.8V15.2C20 16.2 19.2 17 18.2 17H8.6L7 18Z"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 9H16"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+      <path
+        d="M8 13H13"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function GroupDeleteChatModal({
+  open,
+  groupTitle,
+  isOwner,
+  onClose,
+  onDeleteForMe,
+  onDeleteMineForEveryone,
+  onClearChat
+}: {
+  open: boolean;
+  groupTitle?: string;
+  isOwner: boolean;
+  onClose: () => void;
+  onDeleteForMe: () => void;
+  onDeleteMineForEveryone: () => void;
+  onClearChat: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose();
+    }
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div className="group-delete-modal-overlay" onClick={onClose}>
+      <div
+        className="group-delete-modal"
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="group-delete-modal-title"
+      >
+        <div className="group-delete-modal-header">
+          <div className="group-delete-modal-header-icon">
+            <TrashIcon />
+          </div>
+
+          <div className="group-delete-modal-header-copy">
+            <div id="group-delete-modal-title" className="group-delete-modal-title">
+              Delete group chat
+            </div>
+            <div className="group-delete-modal-subtitle">
+              Choose how to delete chat in {groupTitle || 'this group'}
+            </div>
+          </div>
+        </div>
+
+        <div className="group-delete-modal-divider" />
+
+        <div className="group-delete-modal-option-list">
+          <div className="group-delete-modal-option">
+            <div className="group-delete-modal-option-icon">
+              <PersonIcon />
+            </div>
+            <div>
+              <div className="group-delete-modal-option-title">Delete for me</div>
+              <div className="group-delete-modal-option-text">
+                Hides this group chat only on your app.
+              </div>
+            </div>
+          </div>
+
+          <div className="group-delete-modal-option">
+            <div className="group-delete-modal-option-icon">
+              <GroupUsersIcon />
+            </div>
+            <div>
+              <div className="group-delete-modal-option-title">
+                Delete my messages for everyone
+              </div>
+              <div className="group-delete-modal-option-text">
+                Removes all messages you sent in this group for all members.
+              </div>
+            </div>
+          </div>
+
+          {isOwner ? (
+            <div className="group-delete-modal-option">
+              <div className="group-delete-modal-option-icon">
+                <ChatBubbleIcon />
+              </div>
+              <div>
+                <div className="group-delete-modal-option-title">Clear chat</div>
+                <div className="group-delete-modal-option-text">
+                  Removes all group messages for every member.
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="group-delete-modal-note">
+              Only the group owner can clear the whole group chat for everyone.
+            </div>
+          )}
+        </div>
+
+        <div className={`group-delete-modal-actions ${isOwner ? 'owner' : 'member'}`}>
+          <button
+            type="button"
+            className="group-delete-btn secondary"
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+
+          <button
+            type="button"
+            className="group-delete-btn secondary"
+            onClick={onDeleteForMe}
+          >
+            <span className="group-delete-btn-icon">
+              <PersonIcon />
+            </span>
+            <span>Delete for me</span>
+          </button>
+
+          <button
+            type="button"
+            className="group-delete-btn secondary wide-label"
+            onClick={onDeleteMineForEveryone}
+          >
+            <span className="group-delete-btn-icon">
+              <GroupUsersIcon />
+            </span>
+            <span>Delete my messages for everyone</span>
+          </button>
+
+          {isOwner ? (
+            <button
+              type="button"
+              className="group-delete-btn danger"
+              onClick={onClearChat}
+            >
+              <span className="group-delete-btn-icon">
+                <TrashIcon />
+              </span>
+              <span>Clear chat</span>
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
 
@@ -6459,29 +6723,29 @@ export default function App() {
 
       
       <ConfirmModal
-  open={!!deleteChatTarget}
-  title="Delete chat"
-  subtitle={deleteChatTarget ? `Choose how to delete chat with ${deleteChatTarget.name}` : ''}
-  onClose={() => setDeleteChatTargetUserId(null)}
-  actions={
-    <>
-      <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
-        Cancel
-      </button>
-      <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
-        Delete for me
-      </button>
-      <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
-        Delete for everyone
-      </button>
-    </>
-  }
->
-  <>
-    Delete for me hides the current chat only on your app.
-    <br />
-    Delete for everyone removes the chat history for both users.
-  </>
+        open={!!deleteChatTarget}
+        title="Delete chat"
+        subtitle={deleteChatTarget ? `Choose how to delete chat with ${deleteChatTarget.name}` : ''}
+        onClose={() => setDeleteChatTargetUserId(null)}
+        actions={
+          <>
+            <button className="icon-btn wide" onClick={() => setDeleteChatTargetUserId(null)}>
+              Cancel
+            </button>
+            <button className="icon-btn wide" onClick={clearCurrentConversationForMe}>
+              Delete for me
+            </button>
+            <button className="danger wide" onClick={deleteCurrentConversationForEveryone}>
+              Delete for everyone
+            </button>
+          </>
+        }
+      >
+        <>
+          Delete for me hides the current chat only on your app.
+          <br />
+          Delete for everyone removes the chat history for both users.
+        </>
       </ConfirmModal>
 
       <ConfirmModal
@@ -6530,47 +6794,15 @@ export default function App() {
           : 'You will leave this group and stop receiving its messages. Other members will stay in the group.'}
       </ConfirmModal>
 
-      <ConfirmModal
+      <GroupDeleteChatModal
         open={!!deleteGroupChatTarget}
-        title="Delete group chat"
-        subtitle={
-          deleteGroupChatTarget
-            ? `Choose how to delete chat in ${deleteGroupChatTarget.title}`
-            : ''
-        }
+        groupTitle={deleteGroupChatTarget?.title}
+        isOwner={!!deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id)}
         onClose={() => setDeleteGroupChatTargetId(null)}
-        actions={
-          <>
-            <button className="icon-btn wide" onClick={() => setDeleteGroupChatTargetId(null)}>
-              Cancel
-            </button>
-
-            <button className="icon-btn wide" onClick={clearCurrentGroupConversationForMe}>
-              Delete for me
-            </button>
-
-            <button className="icon-btn wide" onClick={deleteOwnGroupMessagesForEveryone}>
-              Delete my messages for everyone
-            </button>
-
-            {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id) ? (
-              <button className="danger wide" onClick={clearGroupChatForEveryone}>
-                Clear chat
-              </button>
-            ) : null}
-          </>
-        }
-      >
-        <>
-          Delete for me hides this group chat only on your app.
-          <br />
-          Delete my messages for everyone removes all messages you sent in this group for all members.
-          <br />
-          {deleteGroupChatTarget && isGroupOwner(deleteGroupChatTarget, me.id)
-            ? 'Clear chat removes all group messages for every member.'
-            : 'Only the group owner can clear the whole group chat for everyone.'}
-        </>
-      </ConfirmModal>
+        onDeleteForMe={clearCurrentGroupConversationForMe}
+        onDeleteMineForEveryone={deleteOwnGroupMessagesForEveryone}
+        onClearChat={clearGroupChatForEveryone}
+      />
 
       {groupMembersOpen && selectedGroup ? (
         <div className="call-overlay" onClick={() => setGroupMembersOpen(false)}>
