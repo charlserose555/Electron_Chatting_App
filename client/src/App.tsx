@@ -24,6 +24,14 @@ type Attachment = {
   isImage: boolean;
 };
 
+type MentionState =
+  | {
+      start: number;
+      end: number;
+      query: string;
+    }
+  | null;
+
 type GroupChat = {
   id: string;
   title: string;
@@ -844,6 +852,30 @@ function playPresenceNotificationSound() {
   } catch {}
 }
 
+function getActiveMention(text: string, caret: number): MentionState {
+  const safeCaret = Math.max(0, Math.min(caret, text.length));
+  const left = text.slice(0, safeCaret);
+
+  const match = left.match(/(^|\s)@([a-zA-Z0-9._-]*)$/);
+  if (!match) return null;
+
+  const query = match[2] || '';
+  const start = safeCaret - query.length - 1;
+
+  return {
+    start,
+    end: safeCaret,
+    query: query.toLowerCase()
+  };
+}
+
+function getGroupRoleLabel(group: GroupChat | null, userId: string) {
+  if (!group) return 'Member';
+  if (group.ownerUserId === userId) return 'Owner';
+  if (group.adminUserIds.includes(userId)) return 'Admin';
+  return 'Member';
+}
+
 export default function App() {
   const storedToken = localStorage.getItem('lan_chat_auth_token') || '';
 
@@ -950,6 +982,10 @@ export default function App() {
   const [groupEditTitle, setGroupEditTitle] = useState('');
   const [groupConfirmDialog, setGroupConfirmDialog] = useState<GroupConfirmDialog>(null);
 
+  const [groupMembersOpen, setGroupMembersOpen] = useState(false);
+  const [groupMemberSearch, setGroupMemberSearch] = useState('');
+  const [mentionState, setMentionState] = useState<MentionState>(null);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [deleteGroupChatTargetId, setDeleteGroupChatTargetId] = useState<string | null>(null);
   const deleteGroupChatTarget =
     groups.find((g) => g.id === deleteGroupChatTargetId) || null;
@@ -1032,6 +1068,10 @@ export default function App() {
     incomingCallModeRef.current = null;
     clearPendingUploads();
     setLightbox(null);
+    setGroupMembersOpen(false);
+    setGroupMemberSearch('');
+    setMentionState(null);
+    setMentionActiveIndex(0);
   
     suppressAutoReadUntilBottomRef.current = false;
     hasUserScrolledCurrentChatRef.current = false;
@@ -3177,6 +3217,84 @@ export default function App() {
       });
     });
   }
+
+  function openGroupMembersModal() {
+    setGroupMemberSearch('');
+    setGroupMembersOpen(true);
+  }
+
+  function openGroupMemberTarget(userId: string) {
+    setGroupMembersOpen(false);
+  
+    if (userId === me?.id) {
+      setProfileOpen(true);
+      return;
+    }
+  
+    stopTyping();
+    setActiveSidebarTab('chats');
+    setSelectedChatKind('direct');
+    setSelectedGroupId('');
+    setHasExplicitContactSelection(true);
+    setSelectedUserId(userId);
+    autoScrollRef.current = true;
+  
+    requestAnimationFrame(() => {
+      void loadHistory(userId, true);
+      focusComposer(false);
+    });
+  }
+  
+  function updateMentionState(value: string, caret: number) {
+    if (selectedChatKind !== 'group' || !selectedGroupId) {
+      setMentionState(null);
+      return;
+    }
+  
+    const next = getActiveMention(value, caret);
+  
+    setMentionState((prev) => {
+      const changed =
+        prev?.start !== next?.start ||
+        prev?.end !== next?.end ||
+        prev?.query !== next?.query;
+  
+      if (changed) {
+        setMentionActiveIndex(0);
+      }
+  
+      return next;
+    });
+  }
+  
+  function insertMention(user: User) {
+    const textarea = composerInputRef.current;
+    const caret = textarea?.selectionStart ?? draft.length;
+    const active = getActiveMention(draft, caret);
+  
+    const mentionText = `@${user.userId} `;
+    const replaceStart = active ? active.start : caret;
+    const replaceEnd = active ? active.end : caret;
+  
+    const nextValue =
+      draft.slice(0, replaceStart) +
+      mentionText +
+      draft.slice(replaceEnd);
+  
+    const nextCaret = replaceStart + mentionText.length;
+  
+    setDraft(nextValue);
+    setMentionState(null);
+    setMentionActiveIndex(0);
+  
+    requestAnimationFrame(() => {
+      const el = composerInputRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(nextCaret, nextCaret);
+      resizeComposerTextarea();
+    });
+  }
   
   function forceMarkConversationAsRead(peerUserId: string, sourceMessages: Message[]) {
     if (!socketRef.current || !me) return;
@@ -4059,6 +4177,55 @@ export default function App() {
       .map((id) => users.find((u) => u.id === id))
       .filter(Boolean) as User[];
   }, [selectedGroup, users]);
+
+  const filteredGroupMembers = useMemo(() => {
+    const q = groupMemberSearch.trim().toLowerCase();
+    if (!q) return selectedGroupMembers;
+  
+    return selectedGroupMembers.filter((user) => {
+      return (
+        user.name.toLowerCase().includes(q) ||
+        user.userId.toLowerCase().includes(q)
+      );
+    });
+  }, [selectedGroupMembers, groupMemberSearch]);
+
+  const mentionCandidates = useMemo(() => {
+    if (selectedChatKind !== 'group' || !selectedGroup || !mentionState) {
+      return [] as User[];
+    }
+  
+    const q = mentionState.query.trim();
+  
+    return selectedGroupMembers
+      .filter((user) => {
+        if (!q) return true;
+  
+        return (
+          user.name.toLowerCase().includes(q) ||
+          user.userId.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => {
+        const aRank =
+          selectedGroup.ownerUserId === a.id
+            ? 0
+            : selectedGroup.adminUserIds.includes(a.id)
+            ? 1
+            : 2;
+  
+        const bRank =
+          selectedGroup.ownerUserId === b.id
+            ? 0
+            : selectedGroup.adminUserIds.includes(b.id)
+            ? 1
+            : 2;
+  
+        if (aRank !== bRank) return aRank - bRank;
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, 8);
+  }, [selectedChatKind, selectedGroup, selectedGroupMembers, mentionState]);
   
   const selectedGroupInviteCandidates = useMemo(() => {
     if (!selectedGroup || !me) return [] as User[];
@@ -4893,17 +5060,26 @@ export default function App() {
               {selectedChatKind === 'group' && selectedGroup ? (
                 <>
                   <div className="chat-person">
-                    <div className="contact-avatar-wrap">
-                      <UserAvatar
-                        user={{
-                          id: selectedGroup.id,
-                          userId: selectedGroup.title,
-                          name: selectedGroup.title,
-                          avatarUrl: selectedGroup.avatarUrl || null
-                        }}
-                        serverUrl={connectedServerUrl}
-                      />
-                    </div>
+                    <button
+                      type="button"
+                      className="group-icon-trigger"
+                      onClick={openGroupMembersModal}
+                      title="Show group members"
+                      aria-label="Show group members"
+                    >
+                      <div className="contact-avatar-wrap">
+                        <UserAvatar
+                          user={{
+                            id: selectedGroup.id,
+                            userId: selectedGroup.title,
+                            name: selectedGroup.title,
+                            avatarUrl: selectedGroup.avatarUrl || null
+                          }}
+                          serverUrl={connectedServerUrl}
+                        />
+                      </div>
+                    </button>
+
                     <div>
                       <div className="name">{selectedGroup.title}</div>
                       <div className="sub">
@@ -5284,19 +5460,103 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
+                {selectedChatKind === 'group' && mentionState ? (
+                  <div className="mention-popup">
+                    {mentionCandidates.length ? (
+                      mentionCandidates.map((user, index) => (
+                        <button
+                          key={user.id}
+                          type="button"
+                          className={`mention-popup-item ${index === mentionActiveIndex ? 'active' : ''}`}
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => insertMention(user)}
+                        >
+                          <UserAvatar
+                            user={user}
+                            serverUrl={connectedServerUrl}
+                            size="small"
+                          />
+
+                          <div className="mention-popup-meta">
+                            <div className="mention-popup-name">{user.name}</div>
+                            <div className="mention-popup-sub">
+                              @{user.userId} · {getGroupRoleLabel(selectedGroup, user.id)}
+                            </div>
+                          </div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="mention-popup-empty">No members found</div>
+                    )}
+                  </div>
+                ) : null}
                 <textarea
                   ref={composerInputRef}
                   className="composer-input"
                   value={draft}
                   rows={1}
                   onChange={(e) => {
-                    setDraft(e.target.value);
+                    const value = e.target.value;
+                    const caret = e.target.selectionStart ?? value.length;
+
+                    setDraft(value);
                     startTyping();
                     resizeComposerTextarea();
+                    updateMentionState(value, caret);
+                  }}
+                  onClick={(e) => {
+                    updateMentionState(
+                      e.currentTarget.value,
+                      e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                    );
+                  }}
+                  onKeyUp={(e) => {
+                    updateMentionState(
+                      e.currentTarget.value,
+                      e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                    );
                   }}
                   onPaste={handleComposerPaste}
-                  onBlur={stopTyping}
+                  onBlur={() => {
+                    stopTyping();
+                    window.setTimeout(() => {
+                      setMentionState(null);
+                    }, 120);
+                  }}
                   onKeyDown={(e) => {
+                    if (selectedChatKind === 'group' && mentionState) {
+                      if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        if (mentionCandidates.length) {
+                          setMentionActiveIndex((prev) =>
+                            prev + 1 >= mentionCandidates.length ? 0 : prev + 1
+                          );
+                        }
+                        return;
+                      }
+
+                      if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        if (mentionCandidates.length) {
+                          setMentionActiveIndex((prev) =>
+                            prev - 1 < 0 ? mentionCandidates.length - 1 : prev - 1
+                          );
+                        }
+                        return;
+                      }
+
+                      if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && mentionCandidates.length) {
+                        e.preventDefault();
+                        insertMention(mentionCandidates[mentionActiveIndex] || mentionCandidates[0]);
+                        return;
+                      }
+
+                      if (e.key === 'Escape') {
+                        setMentionState(null);
+                        return;
+                      }
+                    }
+
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       void sendMessage();
@@ -6311,6 +6571,67 @@ export default function App() {
             : 'Only the group owner can clear the whole group chat for everyone.'}
         </>
       </ConfirmModal>
+
+      {groupMembersOpen && selectedGroup ? (
+        <div className="call-overlay" onClick={() => setGroupMembersOpen(false)}>
+          <div
+            className="call-modal admin-modal group-members-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="call-top">
+              <div>
+                <div className="call-name">Group Members</div>
+                <div className="call-sub">
+                  {selectedGroup.title} · {selectedGroup.memberIds.length} members
+                </div>
+              </div>
+            </div>
+
+            <div className="admin-toolbar">
+              <input
+                className="admin-search-input"
+                value={groupMemberSearch}
+                onChange={(e) => setGroupMemberSearch(e.target.value)}
+                placeholder="Search members by name or user ID"
+              />
+            </div>
+
+            <div className="admin-user-list">
+              {filteredGroupMembers.length ? (
+                filteredGroupMembers.map((user) => (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className="admin-user-row member-row-action"
+                    onClick={() => openGroupMemberTarget(user.id)}
+                  >
+                    <div className="admin-user-main">
+                      <UserAvatar user={user} serverUrl={connectedServerUrl} size="small" />
+                      <div>
+                        <div className="contact-name">
+                          {user.name}
+                          {user.id === me.id ? ' (You)' : ''}
+                        </div>
+                        <div className="contact-preview">
+                          @{user.userId} · {getGroupRoleLabel(selectedGroup, user.id)}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                ))
+              ) : (
+                <div className="admin-empty">No members found.</div>
+              )}
+            </div>
+
+            <div className="call-actions" style={{ justifyContent: 'flex-end' }}>
+              <button className="icon-btn wide" onClick={() => setGroupMembersOpen(false)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div className={`app-toast ${toast.tone}`} role="status" aria-live="polite">
