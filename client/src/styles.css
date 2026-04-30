@@ -37,26 +37,29 @@ button {
   cursor: pointer;
 }
 
-.app-shell {
-  height: 100%;
-  display: grid;
-  grid-template-columns: 320px 1fr;
-  gap: 18px;
-  padding: 16px;
-}
-
-.sidebar,
-.chat-panel {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  overflow: hidden;
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
-}
-
 .sidebar {
+  grid-area: sidebar;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 0;
+  border-top: none;
+  overflow: hidden;
   background: linear-gradient(180deg, #0a1b33, #08172d);
   display: flex;
   flex-direction: column;
+  border-right: 1px solid var(--line);
+}
+
+.chat-panel {
+  grid-area: main;
+  min-width: 0;
+  min-height: 0;
+  border-radius: 0;
+  border-top: none;
+  overflow: hidden;
+  background: linear-gradient(180deg, #0a1b33, #07162b);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
 }
 
 .name,
@@ -768,14 +771,6 @@ button {
   place-items: center;
   font-size: 18px;
   color: var(--muted);
-}
-
-.login-shell {
-  min-height: 100%;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: radial-gradient(circle at top, #0c2345, #061224 58%);
 }
 
 .login-card {
@@ -3205,4 +3200,202 @@ button {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.composer-input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.composer-input-shell {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+
+.composer-inline-attach {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 34px;
+  height: 34px;
+  border: none;
+  background: transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+}
+
+.composer-inline-attach:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.composer-input-with-attach {
+  padding-left: 52px;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.desktop-titlebar {
+  height: 46px;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  background: #0a1728;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  position: relative;
+  z-index: 50;
+  user-select: none;
+}
+
+.desktop-titlebar-drag {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  app-region: drag;
+  -webkit-app-region: drag;
+  min-width: 0;
+}
+
+.desktop-titlebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #e8f0ff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  min-width: 0;
+}
+
+.desktop-titlebar-logo {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  object-fit: cover;
+  flex: 0 0 auto;
+}
+
+.desktop-titlebar-actions {
+  display: flex;
+  align-items: stretch;
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+.desktop-titlebar-btn {
+  width: 46px;
+  height: 46px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #d8e4ff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.16s ease, color 0.16s ease;
+  font-size: 14px;
+}
+
+.desktop-titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.desktop-titlebar-btn.close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
+.app-shell {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  grid-template-rows: 46px 1fr;
+  grid-template-areas:
+    "titlebar titlebar"
+    "sidebar main";
+  overflow: hidden;
+}
+
+.desktop-titlebar {
+  grid-area: titlebar;
+}
+
+.sidebar {
+  grid-area: sidebar;
+  min-height: 0;
+}
+
+.chat-panel {
+  grid-area: main;
+  min-height: 0;
+}
+
+.login-shell {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, #0c2345, #061224 58%);
+}
+
+.auth-shell {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: 46px minmax(0, 1fr);
+  grid-template-areas:
+    "titlebar"
+    "content";
+  overflow: hidden;
+  background: radial-gradient(circle at top, #0c2345, #061224 58%);
+}
+
+.auth-shell .desktop-titlebar {
+  grid-area: titlebar;
+}
+
+.auth-content {
+  grid-area: content;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.auth-content .login-card {
+  margin: 0;
+}
+
+.auth-card {
+  width: min(520px, 100%);
+}
+
+.app-shell.browser-mode {
+  grid-template-rows: 1fr;
+  grid-template-areas: "sidebar main";
+}
+
+.auth-shell.browser-mode {
+  grid-template-rows: 1fr;
+  grid-template-areas: "content";
+}
+
+.auth-shell.browser-mode .auth-content {
+  padding-top: 24px;
 }

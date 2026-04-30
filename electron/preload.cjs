@@ -6,6 +6,17 @@ contextBridge.exposeInMainWorld('desktop', {
   onOpenFileDialog: () => ipcRenderer.invoke('desktop:open-file-dialog'),
   setBadgeCount: (count) => ipcRenderer.invoke('app:set-badge-count', count),
 
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  isWindowMaximized: () => ipcRenderer.invoke('window:is-maximized'),
+
+  onWindowStateChanged: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('window:state-changed', handler);
+    return () => ipcRenderer.removeListener('window:state-changed', handler);
+  },
+
   onNavigateToChat: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('desktop:navigate-to-chat', handler);
