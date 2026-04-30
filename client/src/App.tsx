@@ -210,6 +210,31 @@ function timeLabel(ts?: number | null) {
   return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
+function listTimeLabel(ts?: number | null) {
+  if (!ts) return '';
+
+  const d = new Date(ts);
+  const now = new Date();
+
+  const isToday =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+
+  if (isToday) {
+    return d.toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const yyyy = d.getFullYear();
+
+  return `${mm}/${dd}/${yyyy}`;
+}
+
 function dateDivider(ts: number) {
   return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
@@ -1251,19 +1276,31 @@ export default function App() {
   const [mentionState, setMentionState] = useState<MentionState>(null);
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const [deleteGroupChatTargetId, setDeleteGroupChatTargetId] = useState<string | null>(null);
+  const [isDesktopWindowMaximized, setIsDesktopWindowMaximized] = useState(false);
+
   const deleteGroupChatTarget =
     groups.find((g) => g.id === deleteGroupChatTargetId) || null;
 
-  const desktopApi = window.desktop ?? {
-    getConfig: async () => ({
-      platform: 'web',
-      appVersion: 'browser'
-    }),
-    notify: async (_opts: { title: string; body: string; userId?: string; kind?: 'message' | 'call' }) => {},
-    onOpenFileDialog: async () => [],
-    onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {},
-    setBadgeCount: async (_count: number) => {}
+    const desktopApi = window.desktop ?? {
+      getConfig: async () => ({
+        platform: 'web',
+        appVersion: 'browser'
+      }),
+      notify: async (_opts: { title: string; body: string; userId?: string; kind?: 'message' | 'call' }) => {},
+      onOpenFileDialog: async () => [],
+      onNavigateToChat: (_callback: (payload: { userId: string; kind: 'message' | 'call' }) => void) => () => {},
+      setBadgeCount: async (_count: number) => {},
+      minimizeWindow: async () => {},
+      toggleMaximizeWindow: async () => ({ isMaximized: false }),
+      closeWindow: async () => {},
+      isWindowMaximized: async () => false,
+      onWindowStateChanged: (_callback: (payload: { isMaximized: boolean }) => void) => () => {}
   };
+
+  const isDesktopApp =
+  typeof window !== 'undefined' && typeof window.desktop !== 'undefined';
+
+  const isWebBrowser = !isDesktopApp;
 
   useEffect(() => {
     meRef.current = me;
@@ -1318,6 +1355,27 @@ export default function App() {
       setGroupConfirmDialog(null);
     }
   }, [groupManageOpen]);
+
+  useEffect(() => {
+    let disposed = false;
+  
+    desktopApi.isWindowMaximized?.()
+      .then((value) => {
+        if (!disposed) {
+          setIsDesktopWindowMaximized(!!value);
+        }
+      })
+      .catch(() => undefined);
+  
+    const unsubscribe = desktopApi.onWindowStateChanged?.(({ isMaximized }) => {
+      setIsDesktopWindowMaximized(!!isMaximized);
+    });
+  
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
+  }, []);
   
   useEffect(() => {
     setGroupConfirmDialog(null);
@@ -1364,6 +1422,21 @@ export default function App() {
       window.removeEventListener('keydown', handleEscape);
     };
   }, []);
+
+  useEffect(() => {
+    if (!isWebBrowser) return;
+  
+    const href = '/favicon.ico';
+    let link = document.querySelector("link[rel='icon']") as HTMLLinkElement | null;
+  
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+  
+    link.href = href;
+  }, [isWebBrowser]);
 
   useEffect(() => {
     if (activeSidebarTab === 'notifications') {
@@ -4739,78 +4812,147 @@ export default function App() {
     </div>
   ) : null;
 
+  const renderDesktopTitlebar = () => (
+    <div className="desktop-titlebar">
+      <div
+        className="desktop-titlebar-drag"
+        onDoubleClick={() => {
+          void desktopApi.toggleMaximizeWindow?.().then((result: any) => {
+            setIsDesktopWindowMaximized(!!result?.isMaximized);
+          });
+        }}
+      >
+        <div className="desktop-titlebar-brand">
+          <img
+            src="./tray-icon.png"
+            alt="LAN Chat"
+            className="desktop-titlebar-logo"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = 'none';
+            }}
+          />
+          <span>LAN Chat</span>
+        </div>
+      </div>
+  
+      <div className="desktop-titlebar-actions">
+        <button
+          type="button"
+          className="desktop-titlebar-btn"
+          onClick={() => {
+            void desktopApi.minimizeWindow?.();
+          }}
+          aria-label="Minimize"
+          title="Minimize"
+        >
+          <span>—</span>
+        </button>
+  
+        <button
+          type="button"
+          className="desktop-titlebar-btn"
+          onClick={() => {
+            void desktopApi.toggleMaximizeWindow?.().then((result: any) => {
+              setIsDesktopWindowMaximized(!!result?.isMaximized);
+            });
+          }}
+          aria-label={isDesktopWindowMaximized ? 'Restore' : 'Maximize'}
+          title={isDesktopWindowMaximized ? 'Restore' : 'Maximize'}
+        >
+          <span>{isDesktopWindowMaximized ? '❐' : '□'}</span>
+        </button>
+  
+        <button
+          type="button"
+          className="desktop-titlebar-btn close"
+          onClick={() => {
+            void desktopApi.closeWindow?.();
+          }}
+          aria-label="Close"
+          title="Close"
+        >
+          <span>✕</span>
+        </button>
+      </div>
+    </div>
+  );
+
   if (!me) {
     return (
       <>
-        <div className="login-shell">
-          <div className="login-card auth-card">
-            <div className="pill">LAN Chat</div>
-            <h1>{authMode === 'login' ? 'Login' : 'Register'}</h1>
-            <p>
-              {authMode === 'login'
-                ? 'Sign in with your user ID and password.'
-                : 'Create a new account. New user accounts require admin approval.'}
-            </p>
+        <div className={`auth-shell ${isWebBrowser ? 'browser-mode' : ''}`}>
+          {isDesktopApp ? renderDesktopTitlebar() : null}
+
+          <div className="auth-content">
+            <div className="login-card auth-card">
+              <div className="pill">LAN Chat</div>
+              <h1>{authMode === 'login' ? 'Login' : 'Register'}</h1>
+              <p>
+                {authMode === 'login'
+                  ? 'Sign in with your user ID and password.'
+                  : 'Create a new account. New user accounts require admin approval.'}
+              </p>
   
-            <div className="auth-tabs">
-              <button
-                className={`auth-tab ${authMode === 'login' ? 'active' : ''}`}
-                onClick={() => setAuthMode('login')}
-              >
-                Login
-              </button>
-              <button
-                className={`auth-tab ${authMode === 'register' ? 'active' : ''}`}
-                onClick={() => setAuthMode('register')}
-              >
-                Register
-              </button>
-            </div>
+              <div className="auth-tabs">
+                <button
+                  className={`auth-tab ${authMode === 'login' ? 'active' : ''}`}
+                  onClick={() => setAuthMode('login')}
+                >
+                  Login
+                </button>
+                <button
+                  className={`auth-tab ${authMode === 'register' ? 'active' : ''}`}
+                  onClick={() => setAuthMode('register')}
+                >
+                  Register
+                </button>
+              </div>
   
-            <label className="field">
-              <span>User ID</span>
-              <input
-                value={loginUserId}
-                onChange={(e) => setLoginUserId(e.target.value)}
-                placeholder="john.smith"
-              />
-            </label>
-  
-            <label className="field">
-              <span>Password</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-              />
-            </label>
-  
-            {authMode === 'register' ? (
               <label className="field">
-                <span>Confirm password</span>
+                <span>User ID</span>
                 <input
-                  type="password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  placeholder="Confirm password"
+                  value={loginUserId}
+                  onChange={(e) => setLoginUserId(e.target.value)}
+                  placeholder="john.smith"
                 />
               </label>
-            ) : null}
-
-            <button
-              className="primary"
-              onClick={authMode === 'login' ? handleLogin : handleRegister}
-            >
-              {authMode === 'login' ? 'Login' : 'Register'}
-            </button>
-
-            <div className="foot-note">
-              Server: {FIXED_SERVER_URL}
-            </div>  
   
-            <div className="foot-note">
-              App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
+              <label className="field">
+                <span>Password</span>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Password"
+                />
+              </label>
+  
+              {authMode === 'register' ? (
+                <label className="field">
+                  <span>Confirm password</span>
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm password"
+                  />
+                </label>
+              ) : null}
+  
+              <button
+                className="primary"
+                onClick={authMode === 'login' ? handleLogin : handleRegister}
+              >
+                {authMode === 'login' ? 'Login' : 'Register'}
+              </button>
+  
+              <div className="foot-note">
+                Server: {FIXED_SERVER_URL}
+              </div>
+  
+              <div className="foot-note">
+                App {appInfo?.appVersion || ''} · {appInfo?.platform || ''}
+              </div>
             </div>
           </div>
         </div>
@@ -4821,7 +4963,8 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isWebBrowser ? 'browser-mode' : ''}`}>
+      {isDesktopApp ? renderDesktopTitlebar() : null}
       <aside className="sidebar">
         <div className="sidebar-top">
           <div className="profile-card">
@@ -5037,7 +5180,7 @@ export default function App() {
                             <span className="contact-name">{group.title}</span>
 
                             <div className="contact-head-right">
-                              <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                              <span className="contact-time">{listTimeLabel(last?.createdAt)}</span>
 
                               {unreadCount > 0 ? (
                                 <span className="contact-badge below-time">
@@ -5085,7 +5228,7 @@ export default function App() {
                           <span className="contact-name">{user.name}</span>
 
                           <div className="contact-head-right">
-                            <span className="contact-time">{timeLabel(last?.createdAt)}</span>
+                            <span className="contact-time">{listTimeLabel(last?.createdAt)}</span>
 
                             {unreadCount > 0 ? (
                               <span className="contact-badge below-time">
@@ -5142,7 +5285,7 @@ export default function App() {
                           <span className="contact-name">{displayName}</span>
                           <div className="contact-head-right">
                             <span className="contact-time">
-                              {timeLabel(message.createdAt)}
+                              {listTimeLabel(message.createdAt)}
                             </span>
                           </div>
                         </div>
@@ -5183,7 +5326,18 @@ export default function App() {
             size="small"
           />
           <div className="invitation-text">
-            <div className="contact-name">{invite.title}</div>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gap: 12
+              }}
+            >
+              <div className="contact-name">{invite.title}</div>
+              <div className="contact-time">{listTimeLabel(invite.createdAt)}</div>
+            </div>
+
             <div className="contact-preview invitation-preview">
               {isRequested
                 ? 'Waiting for owner approval'
@@ -5294,7 +5448,7 @@ export default function App() {
                         <div className="contact-head">
                           <span className="contact-name">{heading}</span>
                           <div className="contact-head-right">
-                            <span className="contact-time">{timeLabel(item.createdAt)}</span>
+                            <span className="contact-time">{listTimeLabel(item.createdAt)}</span>
                           </div>
                         </div>
 
@@ -5765,85 +5919,94 @@ export default function App() {
                 ) : null}
 
                 <div className="composer-input-row">
-                  <textarea
-                    ref={composerInputRef}
-                    className="composer-input"
-                    value={draft}
-                    rows={1}
-                    onChange={(e) => {
-                      const value = e.target.value;
-                      const caret = e.target.selectionStart ?? value.length;
-
-                      setDraft(value);
-                      startTyping();
-                      resizeComposerTextarea();
-                      updateMentionState(value, caret);
-                    }}
-                    onClick={(e) => {
-                      updateMentionState(
-                        e.currentTarget.value,
-                        e.currentTarget.selectionStart ?? e.currentTarget.value.length
-                      );
-                    }}
-                    onKeyUp={(e) => {
-                      updateMentionState(
-                        e.currentTarget.value,
-                        e.currentTarget.selectionStart ?? e.currentTarget.value.length
-                      );
-                    }}
-                    onPaste={handleComposerPaste}
-                    onBlur={() => {
-                      stopTyping();
-                      window.setTimeout(() => {
-                        setMentionState(null);
-                      }, 120);
-                    }}
-                    onKeyDown={(e) => {
-                      if (selectedChatKind === 'group' && mentionState) {
-                        if (e.key === 'ArrowDown') {
-                          e.preventDefault();
-                          if (mentionCandidates.length) {
-                            setMentionActiveIndex((prev) =>
-                              prev + 1 >= mentionCandidates.length ? 0 : prev + 1
-                            );
-                          }
-                          return;
-                        }
-
-                        if (e.key === 'ArrowUp') {
-                          e.preventDefault();
-                          if (mentionCandidates.length) {
-                            setMentionActiveIndex((prev) =>
-                              prev - 1 < 0 ? mentionCandidates.length - 1 : prev - 1
-                            );
-                          }
-                          return;
-                        }
-
-                        if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && mentionCandidates.length) {
-                          e.preventDefault();
-                          insertMention(mentionCandidates[mentionActiveIndex] || mentionCandidates[0]);
-                          return;
-                        }
-
-                        if (e.key === 'Escape') {
-                          setMentionState(null);
-                          return;
-                        }
-                      }
-
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        void sendMessage();
-                      }
-                    }}
-                    placeholder={pendingUploads.length ? 'Add a caption' : 'Type a message'}
-                  />
-
-                  <div className="composer-actions">
-                    <button className="icon-btn small" onClick={sendAttachment} title="Attach file">
+                  <div className="composer-input-shell">
+                    <button
+                      type="button"
+                      className="composer-inline-attach"
+                      onClick={sendAttachment}
+                      title="Attach file"
+                      aria-label="Attach file"
+                    >
                       📎
                     </button>
+
+                    <textarea
+                      ref={composerInputRef}
+                      className="composer-input composer-input-with-attach"
+                      value={draft}
+                      rows={1}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        const caret = e.target.selectionStart ?? value.length;
+
+                        setDraft(value);
+                        startTyping();
+                        resizeComposerTextarea();
+                        updateMentionState(value, caret);
+                      }}
+                      onClick={(e) => {
+                        updateMentionState(
+                          e.currentTarget.value,
+                          e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                        );
+                      }}
+                      onKeyUp={(e) => {
+                        updateMentionState(
+                          e.currentTarget.value,
+                          e.currentTarget.selectionStart ?? e.currentTarget.value.length
+                        );
+                      }}
+                      onPaste={handleComposerPaste}
+                      onBlur={() => {
+                        stopTyping();
+                        window.setTimeout(() => {
+                          setMentionState(null);
+                        }, 120);
+                      }}
+                      onKeyDown={(e) => {
+                        if (selectedChatKind === 'group' && mentionState) {
+                          if (e.key === 'ArrowDown') {
+                            e.preventDefault();
+                            if (mentionCandidates.length) {
+                              setMentionActiveIndex((prev) =>
+                                prev + 1 >= mentionCandidates.length ? 0 : prev + 1
+                              );
+                            }
+                            return;
+                          }
+
+                          if (e.key === 'ArrowUp') {
+                            e.preventDefault();
+                            if (mentionCandidates.length) {
+                              setMentionActiveIndex((prev) =>
+                                prev - 1 < 0 ? mentionCandidates.length - 1 : prev - 1
+                              );
+                            }
+                            return;
+                          }
+
+                          if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey && mentionCandidates.length) {
+                            e.preventDefault();
+                            insertMention(mentionCandidates[mentionActiveIndex] || mentionCandidates[0]);
+                            return;
+                          }
+
+                          if (e.key === 'Escape') {
+                            setMentionState(null);
+                            return;
+                          }
+                        }
+
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          void sendMessage();
+                        }
+                      }}
+                      placeholder={pendingUploads.length ? 'Add a caption' : 'Type a message'}
+                    />
+                  </div>
+
+                  <div className="composer-actions">
                     <button className="send-btn" onClick={sendMessage}>
                       ➤
                     </button>
